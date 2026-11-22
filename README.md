@@ -12,9 +12,9 @@ A setup where **Claude Code is the project manager and Codex (GPT) is the worker
 | `docs/codex-workers-design.md` | Design of the worker visualizer |
 | `DESIGN.md`, `lib/`, `test/` | Smoke-test project (token-bucket rate limiter) built by two Codex workers |
 
-## Install on a new machine (macOS)
+## Install on a new machine (macOS or Windows)
 
-Requirements: [Claude Code](https://claude.com/claude-code), plus the ChatGPT desktop app (which bundles the Codex CLI) or the standalone `codex` CLI, signed in.
+Requirements: [Claude Code](https://claude.com/claude-code), plus the ChatGPT/Codex desktop app (which bundles the Codex CLI) or the standalone `codex` CLI, signed in. On Windows, run everything in Git Bash and install jq with `winget install jqlang.jq`. See [setup.md](setup.md#windows-verified-2026-11-21-windows-10-git-bash).
 
 ```bash
 git clone https://github.com/HaochengBillYang/claude-project-test.git

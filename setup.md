@@ -39,6 +39,16 @@ Codex writes rate limits into every session log (`~/.codex/sessions/**/*.jsonl`,
 ## Machine quirks
 - No Xcode Command Line Tools: `python3`/`git`-adjacent dev tools may trigger an install prompt. Available: Ruby 2.6 (with minitest), Perl 5.34, bash/zsh, `jq`. Codex's bundled Node: `~/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node`.
 
+## Windows (verified 2026-11-21, Windows 10, Git Bash)
+- The scripts and installer run under Git Bash. Claude Code's Bash tool is Git Bash, so the commands stay the same.
+- Codex CLI: comes with the Codex app from the Microsoft Store, at `%LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\codex.exe`. The hash directory changes with each app update, so the scripts pick the newest one. Set `$CODEX_BIN` to override.
+- jq: `winget install jqlang.jq`. Git Bash cannot see winget's `Links` alias, so the scripts also look under `%LOCALAPPDATA%\Microsoft\WinGet\Packages\jqlang.jq_*\jq.exe`. jq.exe writes CRLF, which the scripts strip.
+- `.gitattributes` keeps `*.sh` files LF. With `core.autocrlf=true`, a clone made before that file existed has CRLF scripts that Git Bash rejects. Fix it with `git rm --cached -r . && git reset --hard`, or re-clone.
+- Run records store native `C:/...` paths (`cygpath -m`) so the plugin can read them. The pid is an MSYS pid. On Windows the plugin runs `codex-usage.sh` and its `kill -0` liveness check through Git Bash: `$CLAUDE_CODE_GIT_BASH_PATH`, else `C:/Program Files/Git/bin/bash.exe`, never WSL's `System32\bash.exe`.
+- Install the plugin from a local checkout with `./install.sh --local`. Use this while the Windows changes are not on GitHub `main`.
+- Ruby smoke test: minitest 6 moved `minitest/mock` into a separate gem, so run `gem install minitest-mock`. If minitest 5 is also installed, RubyGems can resolve `minitest/mock` to v5 and fail. In that case run `ruby -e 'gem "minitest-mock"; load "test/test_rate_limiter.rb"' -Ilib` or remove the old minitest.
+- GUI/computer use is not verified on Windows yet.
+
 ## Seeing workers live
 - `codex-run.sh` writes a run record per worker to `~/.claude/codex-runs/<id>.json` (status, pid, effort, batch, timings) and streams Codex JSON events to `<brief>.md.events.jsonl`. Set `CODEX_BATCH="<name>"` to group parallel workers into one workflow.
 - Launch each worker with the Bash tool's `run_in_background: true` so it shows as a native background shell.

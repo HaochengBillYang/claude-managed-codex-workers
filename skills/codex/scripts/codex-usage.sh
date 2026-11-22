@@ -4,6 +4,16 @@
 # Banked resets (not exposed by the Codex CLI) are read from $CODEX_RESETS_FILE
 # (default ~/.claude/codex-resets.json): {"available": 2, "expires": "2026-12-01", "updated": "2026-11-21"}
 set -u
+# Portable across macOS (BSD date/stat) and Windows Git Bash / Linux (GNU date/stat).
+JQ_BIN=$(command -v jq || true)
+if [ -z "$JQ_BIN" ] && [ -n "${LOCALAPPDATA:-}" ]; then   # winget install jqlang.jq (its Links alias is invisible to MSYS)
+  JQ_BIN=$(ls "$LOCALAPPDATA"/Microsoft/WinGet/Packages/jqlang.jq_*/jq.exe 2>/dev/null | head -1)
+fi
+JQ_BIN=${JQ_BIN:-/usr/bin/jq}
+jq() { "$JQ_BIN" "$@" | tr -d '\r'; }   # jq.exe on Windows emits CRLF
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
+epoch_fmt() { date -d "@$1" "$2" 2>/dev/null || date -r "$1" "$2"; }   # epoch format
+day_end_epoch() { date -d "$1 23:59:59" +%s 2>/dev/null || date -j -f "%Y-%m-%d %H:%M:%S" "$1 23:59:59" +%s 2>/dev/null || echo 0; }
 NOW=$(date +%s)
 f=""
 for c in $(ls -t $(find "$HOME/.codex/sessions" -name '*.jsonl' 2>/dev/null) 2>/dev/null | head -40); do
@@ -11,9 +21,9 @@ for c in $(ls -t $(find "$HOME/.codex/sessions" -name '*.jsonl' 2>/dev/null) 2>/
 done
 [ -z "$f" ] && { echo "No Codex usage snapshot found (run any codex task first)."; echo "STATUS=UNKNOWN"; exit 0; }
 rl=$(grep '"rate_limits"' "$f" | tail -1 | jq -c '.. | objects | select(has("rate_limits")) | .rate_limits' | tail -1)
-snap=$(stat -f %m "$f")
+snap=$(mtime "$f")
 age=$(( (NOW - snap) / 60 ))
-fmt() { date -r "$1" '+%a %b %d %H:%M'; }
+fmt() { epoch_fmt "$1" '+%a %b %d %H:%M'; }
 win() { # name json -> sets U (effective used %), R (reset epoch), E (elapsed % of window)
   local u r w; u=$(jq -r ".$1.used_percent // 0" <<<"$rl"); r=$(jq -r ".$1.resets_at // 0" <<<"$rl"); w=$(jq -r ".$1.window_minutes // 0" <<<"$rl")
   if [ "$r" -gt 0 ] && [ "$NOW" -ge "$r" ]; then u=0; r=$(( r + w*60 )); fi   # window already reset since snapshot
@@ -30,11 +40,11 @@ RN=0; REXP=0
 if [ -f "$RESETS_FILE" ]; then
   RN=$(jq -r ".available // 0" "$RESETS_FILE" 2>/dev/null || echo 0)
   rx=$(jq -r ".expires // empty" "$RESETS_FILE" 2>/dev/null)
-  [ -n "$rx" ] && REXP=$(date -j -f "%Y-%m-%d %H:%M:%S" "$rx 23:59:59" +%s 2>/dev/null || echo 0)
+  [ -n "$rx" ] && REXP=$(day_end_epoch "$rx")
   if [ "$REXP" -gt 0 ] && [ "$NOW" -gt "$REXP" ]; then RN=0; fi   # expired
 fi
 if [ "$RN" -gt 0 ]; then
-  echo "  Banked resets: $RN$( [ "$REXP" -gt 0 ] && echo " (expire $(date -r $REXP '+%a %b %d'))" ) - restore 5h + weekly; user redeems via Codex Usage settings or /usage"
+  echo "  Banked resets: $RN$( [ "$REXP" -gt 0 ] && echo " (expire $(epoch_fmt $REXP '+%a %b %d'))" ) - restore 5h + weekly; user redeems via Codex Usage settings or /usage"
 fi
 credits=$(jq -r 'if .credits.unlimited then "unlimited" elif .credits.has_credits then (.credits.balance|tostring) else empty end' <<<"$rl" 2>/dev/null)
 [ -n "$credits" ] && echo "  Credits: $credits"

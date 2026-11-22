@@ -2,11 +2,23 @@
 # Usage: codex-run.sh <low|medium> <read-only|workspace-write> <workdir> <brief-file>
 set -u
 
+# Works on macOS and on Windows under Git Bash (MSYS).
 APP_CODEX=/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex
+# Windows: the Codex app unpacks its CLI under a per-version hash directory.
+WIN_CODEX=
+if [ -n "${LOCALAPPDATA:-}" ]; then
+  WIN_CODEX=$(ls -t "$LOCALAPPDATA"/OpenAI/Codex/bin/*/codex.exe 2>/dev/null | head -1)
+fi
 if [ -n "${CODEX_BIN:-}" ]; then CODEX=$CODEX_BIN
 elif [ -x "$APP_CODEX" ]; then CODEX=$APP_CODEX
+elif [ -n "$WIN_CODEX" ]; then CODEX=$WIN_CODEX
 else CODEX=$(command -v codex || echo codex)
 fi
+JQ=$(command -v jq || true)
+if [ -z "$JQ" ] && [ -n "${LOCALAPPDATA:-}" ]; then   # winget install jqlang.jq (its Links alias is invisible to MSYS)
+  JQ=$(ls "$LOCALAPPDATA"/Microsoft/WinGet/Packages/jqlang.jq_*/jq.exe 2>/dev/null | head -1)
+fi
+JQ=${JQ:-/usr/bin/jq}
 RUNS_DIR=${CODEX_RUNS_DIR:-"$HOME/.claude/codex-runs"}
 BATCH=${CODEX_BATCH:-adhoc}
 EFFORT=$1
@@ -17,8 +29,13 @@ SBARGS=(-s "$SB")
 
 brief_path=$BRIEF
 workdir_path=$DIR
-case $brief_path in /*) ;; *) brief_path=$PWD/$brief_path;; esac
-case $workdir_path in /*) ;; *) workdir_path=$PWD/$workdir_path;; esac
+case $brief_path in /*|[A-Za-z]:[/\\]*) ;; *) brief_path=$PWD/$brief_path;; esac
+case $workdir_path in /*|[A-Za-z]:[/\\]*) ;; *) workdir_path=$PWD/$workdir_path;; esac
+# On Windows, record native paths (C:/...) so non-MSYS readers such as the plugin can open them.
+if command -v cygpath >/dev/null 2>&1; then
+  brief_path=$(cygpath -m -- "$brief_path")
+  workdir_path=$(cygpath -m -- "$workdir_path")
+fi
 name=${BRIEF##*/}
 name=${name%.md}
 
@@ -30,7 +47,7 @@ started_at=${timestamp##* }
 record=$RUNS_DIR/$id.json
 
 write_record() {
-  /usr/bin/jq -n \
+  "$JQ" -n \
     --arg id "$id" --arg name "$name" --arg batch "$BATCH" \
     --arg brief "$brief_path" --arg workdir "$workdir_path" \
     --arg effort "$EFFORT" --arg sandbox "$SB" --argjson pid "$child_pid" \

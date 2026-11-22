@@ -232,7 +232,10 @@ test('run records reject partial data, mismatched ids and unsafe pids', () => {
   expect(parseRun(JSON.stringify({ ...RUN, pid: -1 }), RUN.id)).toBe(undefined)
 })
 
-test('the live poll drives the terminal pane, band, auto-open and command toggle', async ($, on) => {
+for (const windows of [false, true] as const) test(
+  `the live poll drives the terminal pane, band, auto-open and command toggle (${windows ? 'Windows' : 'macOS'})`,
+  async ($, on) => {
+  const GIT_BASH = 'C:/Program Files/Git/bin/bash.exe'
   const pane = {
     plugin: 'codex-workers',
     component: 'Pane',
@@ -289,29 +292,41 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   on('fs.list', () => ({
     value: [{ name: RUN.id + '.json', kind: 'file', size: 1, mtimeMs: 0, isLink: false }],
   }))
+  // On a Windows host the engine hands hooks native paths (C:\fixtures\...), so compare in POSIX form.
+  const posix = (path: string) => path.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
   on('fs.stat', (_, e) => {
-    expect(e.path).toBe(RUN.events)
+    expect(posix(e.path)).toBe(RUN.events)
     return { value: { kind: 'file', size: 70000, mtimeMs: 0, isLink: false } }
   })
   on('fs.read', (_, e) => {
-    if (e.path === RUN.events) {
+    const path = posix(e.path)
+    if (path === RUN.events) {
       tailReads.push({ offset: e.offset, length: e.length })
       return { value: 'partial\n' + event({ type: 'command_execution', command: '/bin/zsh -lc "ls"' }) + '\n' }
     }
-    if (e.path === RUN.result) return { value: 'Added fixture tests\nFurther details' }
-    expect(e.path.endsWith('/' + RUN.id + '.json')).toBe(true)
+    if (path === RUN.result) return { value: 'Added fixture tests\nFurther details' }
+    expect(path.endsWith('/' + RUN.id + '.json')).toBe(true)
     return { value: JSON.stringify(record) }
   })
+  on('session.machine', () => ({
+    value: { sysname: windows ? 'Windows_NT' : 'Darwin', release: '', machine: 'x86_64', packageManagers: [], runtimes: [] },
+  }))
+  on('env.get', (_, e) => {
+    // Windows sessions often have no HOME; the plugin falls back to USERPROFILE.
+    const env: Record<string, string> = windows ? { USERPROFILE: 'C:\\Users\\test' } : { HOME: '/Users/test' }
+    return { value: env[e.name] }
+  })
   on('process.run', (_, e) => {
-    if (e.argv[0] === '/usr/bin/printenv') {
-      return { value: { exitCode: 0, stdout: '/Users/test\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-    }
-    const isKill = e.argv[0] === '/bin/kill'
+    const isKill = windows ? e.argv[1] === '-c' : e.argv[0] === '/bin/kill'
     if (isKill) {
-      expect(e.argv.slice(1)).toEqual(['-0', '4242'])
+      expect(e.argv).toEqual(windows ? [GIT_BASH, '-c', 'kill -0 4242'] : ['/bin/kill', '-0', '4242'])
       pidChecks += 1
     } else {
-      expect(e.argv[0]?.endsWith('/codex-usage.sh')).toBe(true)
+      if (windows) {
+        expect(e.argv).toEqual([GIT_BASH, 'C:/Users/test/.claude/skills/codex/scripts/codex-usage.sh'])
+      } else {
+        expect(e.argv).toEqual(['/Users/test/.claude/skills/codex/scripts/codex-usage.sh'])
+      }
       usageCalls += 1
     }
     const stdout = isKill ? '' : [

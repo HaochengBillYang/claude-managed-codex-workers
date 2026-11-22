@@ -16,6 +16,9 @@ const TITLE = 'Codex workers'
 // Resolved from $HOME at session.start so the mod works on any machine.
 let RUNS_DIR = ''
 let USAGE_SCRIPT = ''
+// Windows: .sh scripts and MSYS pids need Git Bash; elsewhere this stays empty.
+let GIT_BASH = ''
+const DEFAULT_GIT_BASH = 'C:/Program Files/Git/bin/bash.exe'
 const RUN_FILE = /^\d{8}-\d{6}-\d+\.json$/
 const TAIL_BYTES = 64 * 1024
 const PANE_WINDOW = 30 * 60
@@ -238,7 +241,9 @@ async function readActivity($: EngineInterface, path: string): Promise<string | 
 }
 
 async function checkPid($: EngineInterface, pid: number): Promise<boolean | undefined> {
-  const result = await $.process.run(['/bin/kill', '-0', String(pid)], { timeoutMs: 1000 })
+  // codex-run.sh records the pid from its own shell: an MSYS pid on Windows, which only Git Bash can see.
+  const argv = GIT_BASH ? [GIT_BASH, '-c', 'kill -0 ' + String(pid)] : ['/bin/kill', '-0', String(pid)]
+  const result = await $.process.run(argv, { timeoutMs: GIT_BASH ? 5000 : 1000 })
   if (result.exitCode === 0) return true
   // A permission error still establishes that the process exists.
   if (/operation not permitted|permission denied/i.test(result.stderr)) return true
@@ -435,8 +440,12 @@ export const register: Register = on => {
   })
 
   on('session.start', async ($, e, next) => {
-    const home = (await $.process.run(['/usr/bin/printenv', 'HOME'], { timeoutMs: 2000 })
-      .then(r => r.stdout.trim(), () => ''))
+    const windows = await $.session.machine().then(m => m.sysname === 'Windows_NT', () => false)
+    if (windows) {
+      GIT_BASH = ((await $.env.get('CLAUDE_CODE_GIT_BASH_PATH')) || DEFAULT_GIT_BASH).replace(/\\/g, '/')
+    }
+    const home = ((await $.env.get('HOME')) || (windows ? await $.env.get('USERPROFILE') : '') || '')
+      .replace(/\\/g, '/').replace(/\/+$/, '')
     if (home) {
       RUNS_DIR = home + '/.claude/codex-runs'
       USAGE_SCRIPT = home + '/.claude/skills/codex/scripts/codex-usage.sh'
@@ -457,7 +466,8 @@ export const register: Register = on => {
       pendingUsage = false
       lastUsage = now
       try {
-        const snapshot = await $.process.run([USAGE_SCRIPT], { timeoutMs: 5000 })
+        const argv = GIT_BASH ? [GIT_BASH, USAGE_SCRIPT] : [USAGE_SCRIPT]
+        const snapshot = await $.process.run(argv, { timeoutMs: GIT_BASH ? 15000 : 5000 })
           .then(result => parseUsage(result.stdout), () => UNKNOWN_USAGE)
         await update($, usage, () => snapshot)
       } catch {
