@@ -22,6 +22,16 @@ Last line decides:
 
 The snapshot only refreshes when Codex runs; the script already treats a window as reset once its reset time has passed.
 
+### Banked resets
+OpenAI occasionally grants **banked resets**. On Plus, one redemption restores both the 5h and weekly windows. Each has an expiry date, and it can only be redeemed once a window is more than 20% used. The Codex CLI does not expose the count, so it is tracked in `~/.claude/codex-resets.json`: `{"available": N, "expires": "YYYY-MM-DD", "updated": "YYYY-MM-DD"}`. A missing file means none.
+- `codex-usage.sh` reads the file and appends `RESETS=N` and sometimes `ADVICE=…` to the STATUS line:
+  - `REDEEM_RECOMMENDED`: weekly-blocked, or 5h-blocked with weekly ≥ 50%. Ask the user to redeem one (Codex app → Settings → Usage → Redeem reset, or `/usage` in interactive codex), unless the queued work can wait for the reset time.
+  - `REDEEM_OPTIONAL`: 5h-blocked with low weekly use. Prefer waiting for the 5h reset; offer the redemption only if the work is urgent.
+  - `REDEEM_BEFORE_EXPIRY`: resets expire within 3 days and a window is more than 20% used. Remind the user once, so the reset is not wasted.
+- While resets remain, being ahead of the weekly pace does not THROTTLE, because the effective weekly budget is larger.
+- **Never redeem yourself.** It spends a scarce account resource. Only the user redeems.
+- After the user says they redeemed, decrement `available` in the file, then run Codex once to refresh the snapshot. When new resets are announced, ask the user for the count and expiry, then update the file.
+
 ## 2. Pick effort
 
 - `low`: single-file or mechanical changes, writing tests for existing code, running test suites, renames, boilerplate, simple GUI steps.

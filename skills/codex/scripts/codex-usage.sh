@@ -1,6 +1,8 @@
 #!/bin/bash
 # Prints Codex rate-limit status from the newest session log that has it.
-# Last line is machine-readable: STATUS=OK|THROTTLE|BLOCKED ...
+# Last line is machine-readable: STATUS=OK|THROTTLE|BLOCKED [UNTIL=..] [RESETS=n] [ADVICE=..] [REASON=..]
+# Banked resets (not exposed by the Codex CLI) are read from $CODEX_RESETS_FILE
+# (default ~/.claude/codex-resets.json): {"available": 2, "expires": "2026-12-01", "updated": "2026-11-21"}
 set -u
 NOW=$(date +%s)
 f=""
@@ -23,8 +25,33 @@ win secondary; WU=$U; WR=$R; WE=$E
 echo "Codex usage (snapshot ${age} min old)"
 echo "  5-hour window: ${PU}% used, resets $(fmt $PR)"
 echo "  Weekly window: ${WU}% used (${WE}% of week elapsed), resets $(fmt $WR)"
+RESETS_FILE=${CODEX_RESETS_FILE:-$HOME/.claude/codex-resets.json}
+RN=0; REXP=0
+if [ -f "$RESETS_FILE" ]; then
+  RN=$(jq -r ".available // 0" "$RESETS_FILE" 2>/dev/null || echo 0)
+  rx=$(jq -r ".expires // empty" "$RESETS_FILE" 2>/dev/null)
+  [ -n "$rx" ] && REXP=$(date -j -f "%Y-%m-%d %H:%M:%S" "$rx 23:59:59" +%s 2>/dev/null || echo 0)
+  if [ "$REXP" -gt 0 ] && [ "$NOW" -gt "$REXP" ]; then RN=0; fi   # expired
+fi
+if [ "$RN" -gt 0 ]; then
+  echo "  Banked resets: $RN$( [ "$REXP" -gt 0 ] && echo " (expire $(date -r $REXP '+%a %b %d'))" ) - restore 5h + weekly; user redeems via Codex Usage settings or /usage"
+fi
+credits=$(jq -r 'if .credits.unlimited then "unlimited" elif .credits.has_credits then (.credits.balance|tostring) else empty end' <<<"$rl" 2>/dev/null)
+[ -n "$credits" ] && echo "  Credits: $credits"
+
 ahead=$(( WU - WE ))
-if [ $PU -ge 90 ]; then echo "STATUS=BLOCKED UNTIL=$PR REASON=5h_limit"
-elif [ $WU -ge 95 ]; then echo "STATUS=BLOCKED UNTIL=$WR REASON=weekly_limit"
-elif [ $PU -ge 70 ] || [ $ahead -gt 15 ]; then echo "STATUS=THROTTLE REASON=5h=${PU}%,weekly_ahead_of_pace_by=${ahead}pts"
-else echo "STATUS=OK"; fi
+EXTRA=""; [ "$RN" -gt 0 ] && EXTRA=" RESETS=$RN"
+soon=0; [ "$RN" -gt 0 ] && [ "$REXP" -gt 0 ] && [ $(( REXP - NOW )) -lt 259200 ] && soon=1
+if [ $PU -ge 90 ]; then
+  adv=""; if [ "$RN" -gt 0 ]; then [ $WU -ge 50 ] && adv=" ADVICE=REDEEM_RECOMMENDED" || adv=" ADVICE=REDEEM_OPTIONAL"; fi
+  echo "STATUS=BLOCKED UNTIL=$PR$EXTRA$adv REASON=5h_limit"
+elif [ $WU -ge 95 ]; then
+  adv=""; [ "$RN" -gt 0 ] && adv=" ADVICE=REDEEM_RECOMMENDED"
+  echo "STATUS=BLOCKED UNTIL=$WR$EXTRA$adv REASON=weekly_limit"
+else
+  adv=""; [ $soon -eq 1 ] && { [ $PU -gt 20 ] || [ $WU -gt 20 ]; } && adv=" ADVICE=REDEEM_BEFORE_EXPIRY"
+  # Banked resets enlarge the effective weekly budget, so pace alone does not throttle while any remain.
+  if [ $PU -ge 70 ] || { [ "$RN" -eq 0 ] && [ $ahead -gt 15 ]; }; then
+    echo "STATUS=THROTTLE$EXTRA$adv REASON=5h=${PU}%,weekly_ahead_of_pace_by=${ahead}pts"
+  else echo "STATUS=OK$EXTRA$adv"; fi
+fi

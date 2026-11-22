@@ -23,6 +23,7 @@ Codex writes rate limits into every session log (`~/.codex/sessions/**/*.jsonl`,
 - **BLOCKED**: 5h ≥ 90% or weekly ≥ 95% → no Codex; Claude does small work itself, queues the rest until reset.
 - **THROTTLE**: 5h ≥ 70% or weekly use > 15 pts ahead of elapsed-week % → low effort only, batch tasks.
 - **OK** otherwise.
+- **Banked resets**: tracked by hand in `~/.claude/codex-resets.json` (`{"available": N, "expires": "YYYY-MM-DD"}`), because the Codex CLI does not expose them. On Plus, each one restores both windows. While any remain, the weekly-pace rule does not throttle. The script adds `RESETS=N` and `ADVICE=REDEEM_RECOMMENDED|REDEEM_OPTIONAL|REDEEM_BEFORE_EXPIRY`. Only the user redeems (Codex app → Settings → Usage → Redeem reset). Details are in `skills/codex/SKILL.md`.
 
 ## Sandbox
 - Use `workspace-write` (writes only inside the workdir) for coding and GUI work, and `read-only` for investigation.
