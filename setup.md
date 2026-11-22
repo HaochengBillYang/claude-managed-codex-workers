@@ -68,6 +68,13 @@ Codex writes rate limits into every session log (`~/.codex/sessions/**/*.jsonl`,
   - Result: headless GUI is **blocked upstream on Windows** in this Codex build. Possible ways forward:
     - wait for a Codex fix (report alongside openai/codex#49484);
     - let a non-`never` approval policy for MCP elicitations, or Codex's auto-review, answer the prompt. That changes the delegation/sandbox policy, which `docs/windows-port.md` puts out of scope, so it needs the owner's decision.
+  - Attempts to have Codex answer the prompt automatically (2026-11-21). All were one-off `-c` overrides, and all were still refused:
+    - `approval_policy="on-request"` with `approvals_reviewer="auto_review"`;
+    - `approval_policy={granular={mcp_elicitations=true, …}}` with `approvals_reviewer="auto_review"`;
+    - the same `granular` policy with `approvals_reviewer="guardian_subagent"`. No reviewer event appeared in `--json` output, so the computer-use prompt does not go through the reviewer.
+    - The valid `approval_policy` values are only `untrusted|on-failure|on-request|granular|never`.
+    - Undocumented: setting `mcp_servers.node_repl.env.NODE_REPL_REQUEST_META` to `{"x-oai-cua-approved-app": "<AUMID>"}`, the marker the JS layer adds after a user accepts. Probably filtered out by `NODE_REPL_UNTRUSTED_ENV_ALLOWLIST`. Going further would mean working around Codex internals, so it was not pursued.
+    - The CLI also logs ``user config.toml: `computer_use.windows.always_allowed_app_ids` is ignored``. That confirms `codex exec` discards the table the app writes.
   - Use the Codex app interactively for GUI work on Windows until then.
 
 ## Seeing workers live
