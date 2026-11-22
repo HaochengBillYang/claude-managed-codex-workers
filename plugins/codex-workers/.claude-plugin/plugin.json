@@ -1,6 +1,6 @@
 {
   "name": "codex-workers",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Live workflow view of Codex (GPT) workers launched by codex-run.sh",
   "types": "./types/index.d.ts",
   "author": {

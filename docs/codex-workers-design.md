@@ -90,3 +90,31 @@ STATUS=OK            (or THROTTLE REASON=… / BLOCKED UNTIL=<epoch> REASON=… 
   - Usage via `$.process.run` every 30 s and immediately after any run finishes.
   - Never throw out of the timer, and tolerate missing or partial files.
 - **State:** `$.state` atoms declared in `types/index.d.ts` (runs view-model, usage, seen ids, pane open).
+
+## v0.2 changes (2026-11-21)
+
+### Band is always visible
+- The band above the prompt renders at all times (not only while workers run), unless `e.props.hasSurvey`.
+- Layout, widest form:
+  `Claude 5h 23% · wk 41% · ctx 38% │ Codex idle · 5h 17% · wk 17% │ /codex-workers`
+  - While workers are current (running, or ended < 60 s ago), `idle` is replaced by the existing worker summary: `⠋ 2 running · 1 done`.
+  - Missing figures show `—`. If Claude has no rate-limit windows (API key, not subscription), show only `ctx`.
+- Narrowing order, applied until it fits `bodyColumns`:
+  1. drop ` · ctx N%`;
+  2. drop the `/codex-workers` hint;
+  3. compact form `C 23%/41% │ X idle 17%/17%`;
+  4. truncate.
+- Color each percentage: yellow ≥ 70, red ≥ 90 (Codex `THROTTLE`/`BLOCKED` status also colors the `Codex` label yellow/red). Use separate `<Text>` segments inside a row `<Box>`.
+
+### Claude usage source
+- `$.session.usage()` (free) → `{ context: { percent? }, rateLimits: [{ kind: 'five_hour'|'seven_day'|…, percentUsed, resetsAt? (ISO) }], cost?: { … } }`. Read once at `session.start`, and on every `session.measure` event (observe, then `return next(e)`). Also refresh every 30 s on the existing timer as a fallback.
+- Store it in a new `$.state` atom `claudeUsage` declared in `types/index.d.ts`: `{ fiveHour: { percent, resetsAt } | null, weekly: … | null, contextPercent: number | null, costUsd: number | null }`. Check the real `SessionCost` type for the cost field name.
+
+### Pane footer
+- Two usage rows under the rule:
+  `Claude  5h ██░░░░░░░░ 23%  resets 23:10   wk ████░░░░░░ 41%  resets Tue 14:49   ctx 38%`
+  `Codex   5h ██░░░░░░░░ 17%  resets 23:10   wk ██░░░░░░░░ 17%  resets Tue 14:49   OK`
+- Claude reset times come from ISO timestamps. Format them in local time: `HH:MM` when within 24 h, else `Ddd HH:MM`. Use the same bar and colour rules as the band. If the pane is narrow, stack the windows vertically as it does today.
+
+### Version
+- `plugin.json` version `0.2.0`.

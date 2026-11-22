@@ -34,11 +34,21 @@ export type CodexUsage = {
   reason: string | null
 }
 
+export type ClaudeUsageWindow = { percent: number; resetsAt: string | null }
+
+export type ClaudeUsage = {
+  fiveHour: ClaudeUsageWindow | null
+  weekly: ClaudeUsageWindow | null
+  contextPercent: number | null
+  costUsd: number | null
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'codex-workers': {
       runs: Shaped<WorkersSnapshot>
       usage: Shaped<CodexUsage>
+      claudeUsage: Shaped<ClaudeUsage>
       seenIds: Shaped<string[]>
       paneOpen: boolean
     }

@@ -41,7 +41,7 @@ Codex writes rate limits into every session log (`~/.codex/sessions/**/*.jsonl`,
 ## Seeing workers live
 - `codex-run.sh` writes a run record per worker to `~/.claude/codex-runs/<id>.json` (status, pid, effort, batch, timings) and streams Codex JSON events to `<brief>.md.events.jsonl`. Set `CODEX_BATCH="<name>"` to group parallel workers into one workflow.
 - Launch each worker with the Bash tool's `run_in_background: true` so it shows as a native background shell.
-- The `codex-workers` plugin (`plugins/codex-workers/`, design in `docs/codex-workers-design.md`) draws a workflow pane plus a status row above the prompt from those records. Toggle it with `/codex-workers`.
+- The `codex-workers` plugin (`plugins/codex-workers/`, design in `docs/codex-workers-design.md`) draws a workflow pane from those records. It also draws an always-on status row above the prompt with Claude usage (5h, weekly, context; from `$.session.usage()` and `session.measure`) and Codex usage (from `codex-usage.sh`). Numbers turn yellow at 70% and red at 90%. Versions: 0.1 added the pane and an active-only row; 0.2 made the row always on and added Claude usage. Toggle it with `/codex-workers`.
 
 ## Workflow per task
 1. Claude: `codex-usage.sh` → check status.

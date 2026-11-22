@@ -1,12 +1,17 @@
 import { expect, test } from 'claude-code/testing'
+import type { SessionUsage } from 'claude-code'
 import {
   activityFromEvents,
   applyLiveness,
   bandCounts,
+  extractClaudeUsage,
+  formatClaudeReset,
   formatElapsed,
   groupWorkers,
+  layoutBand,
   parseRun,
   parseUsage,
+  percentColor,
   workerStatus,
 } from './register'
 import type { RunRecord, Worker } from '../types'
@@ -24,6 +29,12 @@ const RUN: RunRecord = {
   ended_at: null,
   events: '/fixtures/impl.md.events.jsonl',
   result: '/fixtures/impl.md.result',
+}
+
+const CLAUDE_USAGE: SessionUsage = {
+  startedAt: 4200000,
+  context: { window: 200000, percent: 38 },
+  rateLimits: [{ kind: 'five_hour', percentUsed: 23 }, { kind: 'seven_day', percentUsed: 41 }],
 }
 
 function worker(record: Partial<RunRecord>, lostAt: number | null = null): Worker {
@@ -88,14 +99,96 @@ test('when all runs are old, the pane shows all members of the latest batch', ()
   expect(groupWorkers([], 5000)).toEqual([])
 })
 
-test('the band counts running workers and outcomes at the 60-second boundary', () => {
-  const done = worker({ status: 'done', ended_at: 4940 })
-  const old = worker({ status: 'failed', ended_at: 4939 })
+test('the band counts running workers and outcomes less than 60 seconds old', () => {
+  const done = worker({ status: 'done', ended_at: 4941 })
+  const old = worker({ status: 'failed', ended_at: 4940 })
   const killed = worker({ status: 'killed', ended_at: 4999 })
   const lost = worker({}, 4998)
   expect(bandCounts([worker({}), done, old, killed, lost], 5000)).toEqual({
     running: 1, done: 1, failed: 0, killed: 1, lost: 1,
   })
+})
+
+test('the band drops context, drops the hint, compacts and then truncates', () => {
+  const claude = extractClaudeUsage(CLAUDE_USAGE)
+  const codex = parseUsage('5-hour window: 17% used, resets 23:10\nWeekly window: 17% used, resets Tue 14:49\nSTATUS=OK')
+  const layout = (columns: number) => layoutBand([], 5000, claude, codex, columns).map(segment => segment.text).join('')
+  const wide = 'Claude 5h 23% · wk 41% · ctx 38% │ Codex idle · 5h 17% · wk 17% │ /codex-workers'
+  const noContext = 'Claude 5h 23% · wk 41% │ Codex idle · 5h 17% · wk 17% │ /codex-workers'
+  const noHint = 'Claude 5h 23% · wk 41% │ Codex idle · 5h 17% · wk 17%'
+  const compact = 'C 23%/41% │ X idle 17%/17%'
+  expect(layout(wide.length)).toBe(wide)
+  expect(layout(wide.length - 1)).toBe(noContext)
+  expect(layout(noContext.length - 1)).toBe(noHint)
+  expect(layout(noHint.length - 1)).toBe(compact)
+  expect(layout(compact.length)).toBe(compact)
+  expect(layout(compact.length - 1)).toBe('C 23%/41% │ X idle 17%/1…')
+  expect(layout(1)).toBe('…')
+  expect(layout(0)).toBe('')
+})
+
+test('the band keeps worker summaries and displays missing figures', () => {
+  const claude = extractClaudeUsage({ ...CLAUDE_USAGE, rateLimits: [CLAUDE_USAGE.rateLimits[0]!] })
+  const codex = parseUsage('')
+  const active = [worker({}), worker({}), worker({ status: 'done', ended_at: 4999 })]
+  const text = (row: ReturnType<typeof layoutBand>) => row.map(segment => segment.text).join('')
+  expect(text(layoutBand(active, 5000, claude, codex, 100)))
+    .toBe('Claude 5h 23% · wk — · ctx 38% │ Codex ⠋ 2 running · 1 done · 5h — · wk — │ /codex-workers')
+  expect(text(layoutBand(active, 5000, claude, codex, 40))).toBe('C 23%/— │ X ⠋ 2 running · 1 done —/—')
+  const api = extractClaudeUsage({ ...CLAUDE_USAGE, rateLimits: [] })
+  expect(text(layoutBand([], 5000, api, codex, 84)))
+    .toBe('Claude ctx 38% │ Codex idle · 5h — · wk — │ /codex-workers')
+  expect(text(layoutBand([], 5000, api, codex, 28))).toBe('C ctx 38% │ X idle —/—')
+})
+
+test('usage thresholds color every percentage and the Codex status label', () => {
+  expect([null, 0, 69.9, 70, 89.9, 90, 100].map(percentColor))
+    .toEqual([undefined, undefined, undefined, 'yellow', 'yellow', 'red', 'red'])
+  const claude = extractClaudeUsage({
+    ...CLAUDE_USAGE,
+    context: { window: 200000, percent: 91 },
+    rateLimits: [{ kind: 'five_hour', percentUsed: 70 }, { kind: 'seven_day', percentUsed: 69.9 }],
+  })
+  const codex = parseUsage('5-hour window: 90% used, resets 23:10\nWeekly window: 89% used, resets Tue 14:49\nSTATUS=THROTTLE')
+  const colored = (row: ReturnType<typeof layoutBand>) => row.filter(segment => segment.color)
+    .map(({ text, color }) => [text, color])
+  expect(colored(layoutBand([], 5000, claude, codex, 100))).toEqual([
+    ['70%', 'yellow'], ['91%', 'red'], ['Codex', 'yellow'], ['90%', 'red'], ['89%', 'yellow'],
+  ])
+  expect(colored(layoutBand([], 5000, claude, { ...codex, status: 'BLOCKED' }, 35))).toEqual([
+    ['70%', 'yellow'], ['X', 'red'], ['90%', 'red'], ['89%', 'yellow'],
+  ])
+})
+
+test('Claude usage extracts the supported windows, context and USD cost', () => {
+  const snapshot: SessionUsage = {
+    ...CLAUDE_USAGE,
+    rateLimits: [
+      { kind: 'spend_limit', percentUsed: 102 },
+      { kind: 'seven_day', percentUsed: 0, resetsAt: '2026-11-24T20:49:00Z' },
+    ],
+    cost: { usd: 1.25, hasUnknownPrice: true },
+  }
+  expect(extractClaudeUsage(snapshot)).toEqual({
+    fiveHour: null, weekly: { percent: 0, resetsAt: '2026-11-24T20:49:00Z' }, contextPercent: 38, costUsd: 1.25,
+  })
+  expect(extractClaudeUsage(CLAUDE_USAGE)).toEqual({
+    fiveHour: { percent: 23, resetsAt: null }, weekly: { percent: 41, resetsAt: null }, contextPercent: 38, costUsd: null,
+  })
+  expect(extractClaudeUsage({ context: { window: 200000 }, rateLimits: [] })).toEqual({
+    fiveHour: null, weekly: null, contextPercent: null, costUsd: null,
+  })
+})
+
+test('Claude resets use local time and add the weekday at 24 hours', () => {
+  const reset = new Date(2026, 10, 24, 4, 9)
+  const iso = reset.toISOString()
+  const day = 24 * 60 * 60 * 1000
+  expect(formatClaudeReset(iso, reset.getTime() - day + 1)).toBe('04:09')
+  expect(formatClaudeReset(iso, reset.getTime() - day)).toBe('Tue 04:09')
+  expect(formatClaudeReset(iso, reset.getTime() - 2 * day)).toBe('Tue 04:09')
+  expect(formatClaudeReset('invalid', reset.getTime())).toBe('')
+  expect(formatClaudeReset(null, reset.getTime())).toBe('')
 })
 
 test('usage reads percentages, reset labels and machine status details', () => {
@@ -146,7 +239,7 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
     requestId: 'codex-workers',
     surface: 'terminal',
     props: {
-      title: 'Codex workers', bodyColumns: 84, isFocused: false, placement: 'dock',
+      title: 'Codex workers', bodyColumns: 96, isFocused: false, placement: 'dock',
       scroll: { offset: 0, bodyRows: 20 }, view: {},
     },
   } as const
@@ -164,6 +257,9 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   let isOpen = false
   let opens = 0
   let usageCalls = 0
+  let claudeUsageCalls = 0
+  let measured = 0
+  let claudeSnapshot = CLAUDE_USAGE
   let pidChecks = 0
   const tailReads: { offset?: number; length?: number }[] = []
   let tick = () => {}
@@ -173,6 +269,15 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   const firstOpen = new Promise<void>(resolve => { paneOpened = resolve })
   on('command.register', () => ({ value: { command: 'codex-workers' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.usage', () => {
+    claudeUsageCalls += 1
+    return { value: claudeSnapshot }
+  })
+  on('session.measure', (_, e) => {
+    measured += 1
+    expect(e.context.percent).toBe(91)
+    return { changed: e.changed }
+  })
   on('clock.every', (_, e) => {
     expect(e.ms).toBe(1000)
     return new Promise<{ value: undefined }>(resolve => {
@@ -232,6 +337,30 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
     }] : [],
   }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(claudeUsageCalls).toBe(1)
+  const bandUi = await $.ui.mount(band)
+  async function bandText() {
+    return (await bandUi.findAll({ type: 'Text' })).map(item => item.text).join('')
+  }
+  expect(await bandText()).toBe('Claude 5h 23% · wk 41% · ctx 38% │ Codex idle · 5h — · wk — │ /codex-workers')
+  await bandUi.redraw({ ...band.props, hasSurvey: true })
+  expect(await bandUi.find({ type: 'Text', text: /Codex/ })).toBe(undefined)
+  await bandUi.redraw(band.props)
+
+  const measure = {
+    context: { window: 200000, percent: 91 },
+    rateLimits: [{ kind: 'five_hour', percentUsed: 70, resetsAt: new Date((now + 600) * 1000).toISOString() }],
+    cost: { usd: 1 },
+    changed: ['context', 'rateLimits', 'cost'],
+  } satisfies Parameters<typeof $.session.measure>[0]
+  expect(await $.session.measure(measure)).toEqual({ changed: measure.changed })
+  expect(measured).toBe(1)
+  expect(claudeUsageCalls).toBe(1)
+  await bandUi.redraw()
+  expect(await bandText()).toBe('Claude 5h 70% · wk — · ctx 91% │ Codex idle · 5h — · wk — │ /codex-workers')
+  expect((await bandUi.find({ type: 'Text', text: /^70%$/ }))?.props.color).toBe('yellow')
+  expect((await bandUi.find({ type: 'Text', text: /^91%$/ }))?.props.color).toBe('red')
+
   await firstTimer
   tick()
   const paneUi = await $.ui.mount(pane)
@@ -245,13 +374,22 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   }
   expect(await waitForRow(/THROTTLE/)).toBe('THROTTLE')
   expect(await waitForRow(/\$ ls/)).toMatch(/impl.*low · ws.*13:20/)
+  expect((await paneUi.find({ type: 'Box', text: /^Claude  / }))?.text)
+    .toMatch(/^Claude  5h  █{7}░{3}  70%  resets \d{2}:\d{2}  wk —  ctx 91%$/)
+  expect((await paneUi.find({ type: 'Box', text: /^Codex  / }))?.text)
+    .toBe('Codex  5h  █░░░░░░░░░  9%  resets 23:10  wk  ██░░░░░░░░  16%  resets Tue 14:49  THROTTLE')
+  expect((await paneUi.find({ type: 'Text', text: /^70%$/ }))?.props.color).toBe('yellow')
+  await paneUi.redraw({ ...pane.props, bodyColumns: 30 })
+  expect((await paneUi.find({ type: 'Box', text: /^5h.*70%/ }))?.text).toMatch(/resets \d{2}:\d{2}$/)
+  expect((await paneUi.find({ type: 'Box', text: /^wk —$/ }))?.text).toBe('wk —')
+  await paneUi.redraw(pane.props)
   await firstOpen
   expect(opens).toBe(1)
   expect(pidChecks).toBe(1)
   expect(tailReads).toEqual([{ offset: 4464, length: 65536 }])
-  const bandUi = await $.ui.mount(band)
-  expect((await bandUi.find({ type: 'Text', text: /Codex/ }))?.text)
-    .toMatch(/1 running │ 5h 9% · wk 16% │ \/codex-workers/)
+  await bandUi.redraw()
+  expect(await bandText()).toMatch(/Codex ⠋ 1 running · 5h 9% · wk 16% │ \/codex-workers/)
+  expect((await bandUi.find({ type: 'Text', text: /^Codex$/ }))?.props.color).toBe('yellow')
 
   // Let the first tick see a terminal record only one second later.
   record = { ...RUN, status: 'done', exit_code: 0, ended_at: 5001 }
@@ -263,7 +401,16 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   expect(tailReads.length).toBe(1)
   expect(usageCalls).toBe(2)
   await bandUi.redraw()
-  expect((await bandUi.find({ type: 'Text', text: /Codex/ }))?.text).toMatch(/Codex 1 done/)
+  expect(await bandText()).toMatch(/Codex 1 done/)
+  expect(claudeUsageCalls).toBe(1)
+
+  now = 5030
+  claudeSnapshot = { ...CLAUDE_USAGE, context: { window: 200000, percent: 42 }, rateLimits: [] }
+  tick()
+  expect(await waitForRow(/^42%$/)).toBe('42%')
+  expect(claudeUsageCalls).toBe(2)
+  await bandUi.redraw()
+  expect(await bandText()).toBe('Claude ctx 42% │ Codex 1 done · 5h 9% · wk 16% │ /codex-workers')
 
   const command = {
     command: 'codex-workers', args: '', origin: { kind: 'composer' },

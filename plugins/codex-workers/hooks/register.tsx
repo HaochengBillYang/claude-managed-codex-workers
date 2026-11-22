@@ -1,7 +1,9 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, SessionUsage } from 'claude-code'
 
 import type {
+  ClaudeUsage,
+  ClaudeUsageWindow,
   CodexUsage,
   RunRecord,
   RunStatus,
@@ -19,6 +21,7 @@ const TAIL_BYTES = 64 * 1024
 const PANE_WINDOW = 30 * 60
 const BAND_WINDOW = 60
 const SPINNER = Array.from('⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏')
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const UNKNOWN_USAGE: CodexUsage = {
   fiveHour: null,
   weekly: null,
@@ -31,6 +34,8 @@ const runs = atom({ plugin: 'codex-workers', key: 'runs' } as const,
   { now: 0, workers: [] }, { shape: 'runs-1' })
 const usage = atom({ plugin: 'codex-workers', key: 'usage' } as const,
   UNKNOWN_USAGE, { shape: 'usage-1' })
+const claudeUsage = atom({ plugin: 'codex-workers', key: 'claudeUsage' } as const,
+  { fiveHour: null, weekly: null, contextPercent: null, costUsd: null }, { shape: 'claude-usage-1' })
 const seenIds = atom({ plugin: 'codex-workers', key: 'seenIds' } as const,
   [], { shape: 'seen-1' })
 const paneOpen = atom({ plugin: 'codex-workers', key: 'paneOpen' } as const, false)
@@ -177,7 +182,10 @@ function countStatuses(workers: Worker[]) {
 }
 
 export function bandCounts(workers: Worker[], now: number) {
-  return countStatuses(workers.filter(worker => isCurrent(worker, now, BAND_WINDOW)))
+  return countStatuses(workers.filter(worker => {
+    const endedAt = finishedAt(worker)
+    return workerStatus(worker) === 'running' || (endedAt !== null && now - endedAt < BAND_WINDOW)
+  }))
 }
 
 function usageWindow(match: RegExpMatchArray | null): UsageWindow | null {
@@ -197,6 +205,28 @@ export function parseUsage(text: string): CodexUsage {
     until: until ? Number(until[1]) : null,
     reason: details.match(/\bREASON=(.+)/)?.[1]?.trim() ?? null,
   }
+}
+
+export function extractClaudeUsage(snapshot: Pick<SessionUsage, 'context' | 'rateLimits' | 'cost'>): ClaudeUsage {
+  function window(kind: string): ClaudeUsageWindow | null {
+    const limit = snapshot.rateLimits.find(item => item.kind === kind)
+    return limit ? { percent: limit.percentUsed, resetsAt: limit.resetsAt ?? null } : null
+  }
+  return {
+    fiveHour: window('five_hour'),
+    weekly: window('seven_day'),
+    contextPercent: snapshot.context.percent ?? null,
+    costUsd: snapshot.cost?.usd ?? null,
+  }
+}
+
+export function formatClaudeReset(resetsAt: string | null, nowMs: number): string {
+  if (!resetsAt) return ''
+  const reset = new Date(resetsAt)
+  if (!Number.isFinite(reset.getTime())) return ''
+  const time = String(reset.getHours()).padStart(2, '0') + ':' + String(reset.getMinutes()).padStart(2, '0')
+  return Math.abs(reset.getTime() - nowMs) < 24 * 60 * 60 * 1000
+    ? time : WEEKDAYS[reset.getDay()] + ' ' + time
 }
 
 async function readActivity($: EngineInterface, path: string): Promise<string | undefined> {
@@ -272,20 +302,138 @@ function workerRow(worker: Worker, now: number, columns: number, nameWidth: numb
     + (activity ? '   ' + activity : ''), columns)
 }
 
-function windowLabel(label: string, window: UsageWindow | null, columns: number): string {
-  if (!window) return clip(label + ' —', columns)
-  const parts = window.resets.split(/\s+/)
-  const reset = parts.length === 4
-    ? (label === 'wk' ? parts[0] + ' ' : '') + parts[3]
-    : window.resets
-  const info = window.percent + '%' + (reset ? '  resets ' + reset : '')
-  const barWidth = Math.max(0, Math.min(10, columns - label.length - info.length - 4))
-  const used = Math.ceil(window.percent * barWidth / 100)
+type UsageColor = 'yellow' | 'red'
+type Segment = { text: string; color?: UsageColor }
+
+export function percentColor(percent: number | null): UsageColor | undefined {
+  return percent === null ? undefined : percent >= 90 ? 'red' : percent >= 70 ? 'yellow' : undefined
+}
+
+function statusColor(status: CodexUsage['status']): UsageColor | undefined {
+  return status === 'BLOCKED' ? 'red' : status === 'THROTTLE' ? 'yellow' : undefined
+}
+
+function percentage(percent: number | null): Segment {
+  return { text: percent === null ? '—' : percent + '%', color: percentColor(percent) }
+}
+
+function rowWidth(segments: Segment[]): number {
+  return segments.reduce((width, segment) => width + Array.from(segment.text).length, 0)
+}
+
+function clipRow(segments: Segment[], columns: number): Segment[] {
+  if (rowWidth(segments) <= columns) return segments
+  if (columns <= 0) return []
+  const result: Segment[] = []
+  let remaining = columns - 1
+  for (const segment of segments) {
+    const characters = Array.from(segment.text)
+    if (characters.length > remaining) {
+      result.push({ ...segment, text: characters.slice(0, remaining).join('') + '…' })
+      break
+    }
+    result.push(segment)
+    remaining -= characters.length
+  }
+  return result
+}
+
+export function layoutBand(
+  workers: Worker[], now: number, claude: ClaudeUsage, codex: CodexUsage, columns: number,
+): Segment[] {
+  const counts = bandCounts(workers, now)
+  const labels = Object.entries(counts).filter(([, count]) => count > 0)
+  const totals = labels.map(([status, count]) => count + ' ' + status).join(' · ')
+  const workerSummary = (counts.running ? glyph('running', now) + ' ' : '') + (totals || 'idle')
+  const context = [{ text: ' ctx ' }, percentage(claude.contextPercent)]
+  const claudeWindows = [
+    { text: ' 5h ' }, percentage(claude.fiveHour?.percent ?? null),
+    { text: ' · wk ' }, percentage(claude.weekly?.percent ?? null),
+  ]
+  const codexFiveHour = percentage(codex.fiveHour?.percent ?? null)
+  const codexWeekly = percentage(codex.weekly?.percent ?? null)
+  const color = statusColor(codex.status)
+  const hasClaudeWindows = claude.fiveHour !== null || claude.weekly !== null
+  const claudeHead = [{ text: 'Claude' }, ...(hasClaudeWindows ? claudeWindows : context)]
+  const codexTail = [
+    { text: ' │ ' }, { text: 'Codex', color }, { text: ' ' + workerSummary + ' · 5h ' },
+    codexFiveHour, { text: ' · wk ' }, codexWeekly,
+  ]
+  const hint = { text: ' │ /codex-workers' }
+  const wide = [
+    ...claudeHead, ...(hasClaudeWindows ? [{ text: ' ·' }, ...context] : []), ...codexTail, hint,
+  ]
+  if (rowWidth(wide) <= columns) return wide
+  const withoutContext = [...claudeHead, ...codexTail, hint]
+  if (rowWidth(withoutContext) <= columns) return withoutContext
+  const withoutHint = [...claudeHead, ...codexTail]
+  if (rowWidth(withoutHint) <= columns) return withoutHint
+  const compact = [
+    ...(hasClaudeWindows ? [
+      { text: 'C ' }, percentage(claude.fiveHour?.percent ?? null), { text: '/' },
+      percentage(claude.weekly?.percent ?? null),
+    ] : [{ text: 'C' }, ...context]),
+    { text: ' │ ' }, { text: 'X', color }, { text: ' ' + workerSummary + ' ' },
+    codexFiveHour, { text: '/' }, codexWeekly,
+  ]
+  return clipRow(compact, columns)
+}
+
+function codexReset(label: string, resets: string): string {
+  const parts = resets.split(/\s+/)
+  return parts.length === 4 ? (label === 'wk' ? parts[0] + ' ' : '') + parts[3] : resets
+}
+
+function windowSegments(label: string, percent: number | null, reset: string, columns: number): Segment[] {
+  if (percent === null) return clipRow([{ text: label + ' —' }], columns)
+  const value = percentage(percent)
+  const resetLabel = reset ? '  resets ' + reset : ''
+  const barWidth = Math.max(0, Math.min(10, columns - label.length - value.text.length - resetLabel.length - 4))
+  const used = Math.ceil(Math.max(0, Math.min(100, percent)) * barWidth / 100)
   const bar = barWidth ? '  ' + '█'.repeat(used) + '░'.repeat(barWidth - used) : ''
-  return clip(label + bar + '  ' + info, columns)
+  const segments = [{ text: label + bar + '  ' }, value]
+  if (resetLabel) segments.push({ text: resetLabel })
+  return clipRow(segments, columns)
+}
+
+type FooterWindow = { label: string; percent: number | null; reset: string }
+
+function footerRows(
+  label: string, windows: FooterWindow[], tail: Segment[], columns: number,
+): Segment[][] {
+  const parts = windows.map(window => windowSegments(window.label, window.percent, window.reset, Infinity))
+  parts.push(tail)
+  const wide = [{ text: label }, ...parts.flatMap(part => [{ text: '  ' }, ...part])]
+  if (rowWidth(wide) <= columns) return [wide]
+  return [
+    clipRow([{ text: label }], columns),
+    ...windows.map(window => windowSegments(window.label, window.percent, window.reset, columns)),
+    clipRow(tail, columns),
+  ]
+}
+
+async function refreshClaudeUsage($: EngineInterface, getMeasurement: () => number) {
+  const before = getMeasurement()
+  try {
+    const snapshot = extractClaudeUsage(await $.session.usage())
+    // A measurement may arrive while the snapshot is in flight.
+    await update($, claudeUsage, current => before === getMeasurement() ? snapshot : current)
+  } catch {
+    // Keep the last snapshot until a measure event or the next refresh.
+  }
 }
 
 export const register: Register = on => {
+  let measurement = 0
+  const getMeasurement = () => measurement
+
+  on('session.measure', async ($, e, next) => {
+    const observed = ++measurement
+    const snapshot = extractClaudeUsage(e)
+    await update($, claudeUsage, current => observed === measurement ? snapshot : current).catch(() => {})
+    return next(e)
+  })
+
   on('session.start', async ($, e, next) => {
     const home = (await $.process.run(['/usr/bin/printenv', 'HOME'], { timeoutMs: 2000 })
       .then(r => r.stdout.trim(), () => ''))
@@ -294,6 +442,8 @@ export const register: Register = on => {
       USAGE_SCRIPT = home + '/.claude/skills/codex/scripts/codex-usage.sh'
     }
     await $.command.register({ name: 'codex-workers', description: 'Toggle the Codex workers pane' })
+    let lastClaudeUsage = (await $.clock.now()) / 1000
+    await refreshClaudeUsage($, getMeasurement)
 
     let polling = false
     let lastLiveness = -Infinity
@@ -318,10 +468,15 @@ export const register: Register = on => {
     }
 
     async function poll() {
-      if (polling || !RUNS_DIR) return
+      if (polling) return
       polling = true
       try {
         const now = (await $.clock.now()) / 1000
+        if (now - lastClaudeUsage >= 30) {
+          lastClaudeUsage = now
+          await refreshClaudeUsage($, getMeasurement)
+        }
+        if (!RUNS_DIR) return
         const previous = await read($, runs)
         const byId = new Map(previous.workers.map(worker => [worker.record.id, worker]))
         const entries = await $.fs.list(RUNS_DIR).catch(() => undefined)
@@ -386,16 +541,26 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const [{ workers, now }, limits] = await Promise.all([read($, runs), read($, usage)])
+    const [{ workers, now }, codex, claude, nowMs] = await Promise.all([
+      read($, runs), read($, usage), read($, claudeUsage), $.clock.now(),
+    ])
     const groups = groupWorkers(workers, now)
     const columns = e.props.bodyColumns
     const longestName = Math.max(1, ...groups.flatMap(group =>
       group.workers.map(worker => Array.from(worker.record.name).length)))
     const nameWidth = Math.max(1, Math.min(14, longestName, columns - 25))
-    const statusColor = limits.status === 'BLOCKED' ? 'red' : limits.status === 'THROTTLE' ? 'yellow' : undefined
-    const fiveHour = windowLabel('5h', limits.fiveHour, columns)
-    const weekly = windowLabel('wk', limits.weekly, columns)
-    const wide = columns >= fiveHour.length + weekly.length + limits.status.length + 2
+    const claudeWindows = claude.fiveHour || claude.weekly
+      ? ([['5h', claude.fiveHour], ['wk', claude.weekly]] as const).map(([label, window]) => ({
+        label, percent: window?.percent ?? null, reset: formatClaudeReset(window?.resetsAt ?? null, nowMs),
+      }))
+      : []
+    const codexWindows = ([['5h', codex.fiveHour], ['wk', codex.weekly]] as const).map(([label, window]) => ({
+      label, percent: window?.percent ?? null, reset: codexReset(label, window?.resets ?? ''),
+    }))
+    const footer = [
+      ...footerRows('Claude', claudeWindows, [{ text: 'ctx ' }, percentage(claude.contextPercent)], columns),
+      ...footerRows('Codex', codexWindows, [{ text: codex.status, color: statusColor(codex.status) }], columns),
+    ]
     return (
       <Box flexDirection="column">
         {groups.length === 0 && <Text dimColor>No Codex workers yet.</Text>}
@@ -416,11 +581,11 @@ export const register: Register = on => {
           )
         })}
         <Text dimColor>{'─'.repeat(columns)}</Text>
-        <Box flexDirection={wide ? 'row' : 'column'} gap={wide ? 1 : 0}>
-          <Text wrap="truncate-end">{fiveHour}</Text>
-          <Text wrap="truncate-end">{weekly}</Text>
-          <Text color={statusColor}>{limits.status}</Text>
-        </Box>
+        {footer.map(row => (
+          <Box flexDirection="row">
+            {row.map(({ text, color }) => <Text color={color} wrap="truncate-end">{text}</Text>)}
+          </Box>
+        ))}
       </Box>
     )
   })
@@ -428,22 +593,12 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Text } = $.ui.resolve(e)
-    const { workers, now } = await read($, runs)
-    const counts = bandCounts(workers, now)
-    const labels = Object.entries(counts).filter(([, count]) => count > 0)
-    if (labels.length === 0) return next(e)
-    const limits = await read($, usage)
-    const fiveHour = limits.fiveHour ? limits.fiveHour.percent + '%' : '—'
-    const weekly = limits.weekly ? limits.weekly.percent + '%' : '—'
-    const totals = labels.map(([status, count]) => count + ' ' + status).join(' · ')
-    const workersText = 'Codex ' + (counts.running ? glyph('running', now) + ' ' : '') + totals
-    const usageText = ' │ 5h ' + fiveHour + ' · wk ' + weekly
-    const command = ' │ /codex-workers'
-    const columns = e.props.bodyColumns
-    const compact = columns < Array.from(workersText + usageText + command).length
-    const text = compact && columns > command.length
-      ? clip(workersText + usageText, columns - command.length) + command
-      : clip(workersText + usageText + command, columns)
-    return <Box><Text wrap="truncate-end">{text}</Text></Box>
+    const [{ workers, now }, codex, claude] = await Promise.all([read($, runs), read($, usage), read($, claudeUsage)])
+    const row = layoutBand(workers, now, claude, codex, e.props.bodyColumns)
+    return (
+      <Box flexDirection="row">
+        {row.map(({ text, color }) => <Text color={color} wrap="truncate-end">{text}</Text>)}
+      </Box>
+    )
   })
 }
