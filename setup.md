@@ -49,33 +49,17 @@ Codex writes rate limits into every session log (`~/.codex/sessions/**/*.jsonl`,
 - Verified on Windows with a stub `CODEX_BIN`: `$!`/`wait` pass the child's exit code through (`exit 3` gives `status=failed exit_code=3`), and killing the wrapper gives `status=killed exit_code=130` and terminates the child.
 - Install the plugin from a local checkout with `./install.sh --local`. Use this while the Windows changes are not on GitHub `main`.
 - Ruby smoke test: minitest 6 moved `minitest/mock` into a separate gem, so run `gem install minitest-mock`. If minitest 5 is also installed, RubyGems can resolve `minitest/mock` to v5 and fail. In that case run `ruby -e 'gem "minitest-mock"; load "test/test_rate_limiter.rb"' -Ilib` or remove the old minitest.
-- GUI/computer use (Codex app 26.1117, CLI 0.171.0-alpha.13, 2026-11-21), **not working headless yet**:
-  - Headless `codex exec` uses the `@oai/sky` tool through `mcp__node_repl__js` (`sky.list_apps()`, `sky.launch_app({ app })`, `sky.get_window`, `sky.get_window_state`). Store apps are identified by AUMID, for example `Microsoft.WindowsCalculator_8wekyb3d8bbwe!App`.
-  - Approving an app in the Codex app (Settings → Computer Use → Always-allowed) writes a **table** to `%USERPROFILE%\.codex\config.toml`:
+- GUI/computer use (Codex app 26.1117, CLI 0.171.0-alpha.13), **verified headless on 2026-11-21**: Calculator 1234 × 56 gave `69,104`, read from a screenshot.
+  - Headless `codex exec` uses the `@oai/sky` tool through `mcp__node_repl__js` (`sky.list_apps()`, `sky.launch_app({ app })`, `sky.list_windows()`, `sky.get_window`, `sky.activate_window`, `sky.press_key`, `sky.get_window_state`). Store apps are identified by AUMID, for example `Microsoft.WindowsCalculator_8wekyb3d8bbwe!App`; desktop apps by exe name, for example `chrome.exe`.
+  - **Where approvals must go:** the Windows helper (`codex-computer-use.exe`) reads its own list in `%USERPROFILE%\.codex\computer-use\config.toml`:
     ```toml
-    [computer_use.windows.always_allowed_app_ids]
-    "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App" = true
-    "chrome.exe" = true
+    [apps]
+    allowed = ["Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", "chrome.exe"]
     ```
-    The docs describe an array (`always_allowed_app_ids = [...]`), which is the mismatch reported in openai/codex#49484. Store apps are keyed by AUMID, desktop apps by exe name.
-  - Headless runs still fail with `Computer Use was not approved to use Calculator`. This happens with the app-written table, with the array shape passed as `-c computer_use.windows.always_allowed_app_ids=[...]`, and with the Codex app fully closed.
-  - Cause (from reading `@oai/sky` in `%LOCALAPPDATA%\OpenAI\Codex\runtimes\cua_node\…`):
-    - The Windows helper (`codex-computer-use.exe`) returns an `approvalRequest` for Calculator even though the app is always-allowed.
-    - `helper_transport.js` turns that request into an MCP elicitation ("Allow Codex to use Calculator?").
-    - Headless `codex exec` has no UI to answer the elicitation, so it is declined and the error above results.
-    - `codex.exe` itself contains no reference to `always_allowed_app_ids`, so only the desktop app's own elicitation handler honours the table.
-    - On macOS, by contrast, the helper checks its own persisted approvals and never asks for always-allowed apps, which is why headless GUI runs work there.
-  - Result: headless GUI is **blocked upstream on Windows** in this Codex build. Possible ways forward:
-    - wait for a Codex fix (report alongside openai/codex#49484);
-    - let a non-`never` approval policy for MCP elicitations, or Codex's auto-review, answer the prompt. That changes the delegation/sandbox policy, which `docs/windows-port.md` puts out of scope, so it needs the owner's decision.
-  - Attempts to have Codex answer the prompt automatically (2026-11-21). All were one-off `-c` overrides, and all were still refused:
-    - `approval_policy="on-request"` with `approvals_reviewer="auto_review"`;
-    - `approval_policy={granular={mcp_elicitations=true, …}}` with `approvals_reviewer="auto_review"`;
-    - the same `granular` policy with `approvals_reviewer="guardian_subagent"`. No reviewer event appeared in `--json` output, so the computer-use prompt does not go through the reviewer.
-    - The valid `approval_policy` values are only `untrusted|on-failure|on-request|granular|never`.
-    - Undocumented: setting `mcp_servers.node_repl.env.NODE_REPL_REQUEST_META` to `{"x-oai-cua-approved-app": "<AUMID>"}`, the marker the JS layer adds after a user accepts. Probably filtered out by `NODE_REPL_UNTRUSTED_ENV_ALLOWLIST`. Going further would mean working around Codex internals, so it was not pursued.
-    - The CLI also logs ``user config.toml: `computer_use.windows.always_allowed_app_ids` is ignored``. That confirms `codex exec` discards the table the app writes.
-  - Use the Codex app interactively for GUI work on Windows until then.
+    The Codex app's Always-allow (Settings → Computer Use) writes the apps somewhere else instead: the `[computer_use.windows.always_allowed_app_ids]` table in the main `config.toml`, while this list stays `allowed = []`. The CLI ignores that table (openai/codex#49484): `codex exec` logs ``computer_use.windows.always_allowed_app_ids is ignored``. When the helper's list lacks an app, it returns an `approvalRequest`, which becomes an MCP elicitation that headless `exec` declines with `Computer Use was not approved to use <App>`.
+  - **Setup:** always-allow the app in the Codex app, then copy the same ids into `computer-use\config.toml` as above. Back the file up first. Codex calls this file a migration source, so a Codex update or a new Always-allow may rewrite it. If the "not approved" error returns, check this file first.
+  - These approaches do **not** help (all tried as one-off `-c` overrides): the documented array form of `always_allowed_app_ids`; `approval_policy="on-request"` or `granular{mcp_elicitations=true}` with `approvals_reviewer="auto_review"` or `"guardian_subagent"`, because no review fires for this prompt; and closing the Codex app. The valid `approval_policy` values are only `untrusted|on-failure|on-request|granular|never`.
+  - The first `get_window_state` call can return null accessibility data until `activate_window` runs. Have workers verify results from a screenshot.
 
 ## Seeing workers live
 - `codex-run.sh` writes a run record per worker to `~/.claude/codex-runs/<id>.json` (status, pid, effort, batch, timings) and streams Codex JSON events to `<brief>.md.events.jsonl`. Set `CODEX_BATCH="<name>"` to group parallel workers into one workflow.
