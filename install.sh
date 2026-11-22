@@ -74,6 +74,8 @@ if [ "$WITH_PLUGIN" = yes ]; then
     say "Installing codex-workers plugin from $PLUGIN_SOURCE (user scope, every session)"
     claude plugin install codex-workers --marketplace "$PLUGIN_SOURCE" --scope user \
       || warn "Plugin install failed; run it by hand (see README)."
+    # On a re-run the plugin is already installed; re-record its version so `claude plugin list` is current.
+    claude plugin update codex-workers@claude-project-test >/dev/null 2>&1 || true
   else
     warn "claude CLI not on PATH; install the plugin by hand (see README)."
   fi
@@ -84,9 +86,13 @@ cat <<'EOF'
 
 Done. Remaining manual steps (see setup.md for details):
   1. Sign in to Codex once (open the Codex/ChatGPT app, or run `codex login`).
-  2. For GUI work (verified on macOS only): Codex app → Settings → Computer Use → add apps to
-     "Always-allowed" (recommended: Calculator, Google Chrome). On macOS, approve Accessibility +
-     Screen Recording for "Codex Computer Use" when asked.
+  2. For GUI work: Codex app → Settings → Computer Use → add apps to "Always-allowed"
+     (recommended: Calculator, Google Chrome).
+     macOS: approve Accessibility + Screen Recording for "Codex Computer Use" when asked.
+     Windows: headless runs also need the app ids in ~/.codex/computer-use/config.toml, e.g.
+       [apps]
+       allowed = ["Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", "chrome.exe"]
+     (see setup.md, Windows section).
   3. Check the model exists for your account:
        ~/.claude/skills/codex/scripts/codex-usage.sh
      and edit `-m gpt-6.2-sol` in ~/.claude/skills/codex/scripts/codex-run.sh if needed.
