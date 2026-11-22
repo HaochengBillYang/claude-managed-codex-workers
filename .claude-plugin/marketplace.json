@@ -1,5 +1,5 @@
 {
-  "name": "claude-project-test",
+  "name": "claude-managed-codex-workers",
   "owner": { "name": "HaochengBillYang" },
   "plugins": [
     {

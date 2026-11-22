@@ -52,7 +52,7 @@ say "Added permission rules to $SETTINGS (backup: $SETTINGS.bak-$STAMP)"
 if [ "$WITH_PLUGIN" = yes ]; then
   if command -v claude >/dev/null; then
     say "Installing codex-workers plugin (user scope, every session)"
-    claude plugin install codex-workers --marketplace HaochengBillYang/claude-project-test --scope user \
+    claude plugin install codex-workers --marketplace HaochengBillYang/claude-managed-codex-workers --scope user \
       || warn "Plugin install failed; run it by hand (see README)."
   else
     warn "claude CLI not on PATH; install the plugin by hand (see README)."

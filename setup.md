@@ -56,7 +56,7 @@ Codex writes rate limits into every session log (`~/.codex/sessions/**/*.jsonl`,
 
 ## New machine
 1. Install Claude Code and either the ChatGPT desktop app (it bundles Codex) or the standalone `codex` CLI. Sign in to Codex once.
-2. `git clone https://github.com/HaochengBillYang/claude-project-test.git && cd claude-project-test && ./install.sh`. This installs the skill, the permission rules and the plugin (user scope); `--no-plugin` skips the plugin.
+2. `git clone https://github.com/HaochengBillYang/claude-managed-codex-workers.git && cd claude-managed-codex-workers && ./install.sh`. This installs the skill, the permission rules and the plugin (user scope); `--no-plugin` skips the plugin.
 3. Check the model: run `~/.claude/skills/codex/scripts/codex-usage.sh` after one Codex run, and look in `~/.codex/models_cache.json` for `gpt-6.2-sol`. If the account lacks it, change `-m` in `codex-run.sh`.
 4. GUI: in the Codex app, go to Settings → Computer Use → Always-allowed. Add Calculator and Google Chrome (or type `@Computer open <App>` and choose **Always allow**). Grant macOS Accessibility and Screen Recording to "Codex Computer Use". Smoke test: ask Claude to have Codex compute 1234 × 56 in Calculator (expected 69,104).
    Then verify the whole setup: `tests/e2e.sh --gui` (one real Codex run, plus one GUI run; about 1-2% of the 5h window).
@@ -64,5 +64,5 @@ Codex writes rate limits into every session log (`~/.codex/sessions/**/*.jsonl`,
 6. If Xcode Command Line Tools are missing, avoid `python3` (it triggers an install prompt). The skill only needs bash, jq and the Codex CLI.
 
 ## Updating
-- Edit the skill or plugin in this repo, then re-run `./install.sh`. For the plugin, run `claude plugin marketplace update claude-project-test` (or reinstall) once the change is pushed.
+- Edit the skill or plugin in this repo, then re-run `./install.sh`. For the plugin, run `claude plugin marketplace update claude-managed-codex-workers` (or reinstall) once the change is pushed.
 - Git operations (commit, push, repo settings) are handled by the separate **Github Repo Manager** Claude session.

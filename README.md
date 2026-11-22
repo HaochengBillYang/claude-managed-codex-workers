@@ -1,4 +1,4 @@
-# claude-project-test
+# claude-managed-codex-workers
 
 A setup where **Claude Code is the project manager and Codex (GPT) is the worker**. Claude scopes, designs, reviews and gives the verdict. Codex workers implement, test and do GUI tasks. You can watch them run live in Claude Code.
 
@@ -18,8 +18,8 @@ A setup where **Claude Code is the project manager and Codex (GPT) is the worker
 Requirements: [Claude Code](https://claude.com/claude-code), plus the ChatGPT desktop app (which bundles the Codex CLI) or the standalone `codex` CLI, signed in.
 
 ```bash
-git clone https://github.com/HaochengBillYang/claude-project-test.git
-cd claude-project-test
+git clone https://github.com/HaochengBillYang/claude-managed-codex-workers.git
+cd claude-managed-codex-workers
 ./install.sh
 ```
 
@@ -35,16 +35,16 @@ To install only the plugin, use one of these:
 At the prompt of a terminal Claude Code session:
 
 ```
-/plugin install codex-workers --marketplace HaochengBillYang/claude-project-test
+/plugin install codex-workers --marketplace HaochengBillYang/claude-managed-codex-workers
 ```
 
 From a shell:
 
 ```bash
-claude plugin install codex-workers --marketplace HaochengBillYang/claude-project-test
+claude plugin install codex-workers --marketplace HaochengBillYang/claude-managed-codex-workers
 ```
 
-In the desktop app, click **+** next to the prompt box, then **Plugins**, then **Add marketplace** with `HaochengBillYang/claude-project-test`, then **Add plugin**.
+In the desktop app, click **+** next to the prompt box, then **Plugins**, then **Add marketplace** with `HaochengBillYang/claude-managed-codex-workers`, then **Add plugin**.
 
 ## Use
 
