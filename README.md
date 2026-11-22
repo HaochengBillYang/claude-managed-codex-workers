@@ -9,6 +9,7 @@ A setup where **Claude Code is the project manager and Codex (GPT) is the worker
 | `plugins/codex-workers/` | Claude Code plugin (v0.2): an always-on status row above the prompt with Claude and Codex usage, and a live workflow pane of running Codex workers |
 | `.claude-plugin/marketplace.json` | Makes this repo a plugin marketplace |
 | `install.sh` | One-shot installer for a new machine |
+| `tests/e2e.sh` | End-to-end check: install, usage budget, a live Codex worker, run records, optional Calculator GUI (`--gui`), plugin tests |
 | `docs/codex-workers-design.md` | Design of the worker visualizer |
 | `DESIGN.md`, `lib/`, `test/` | Smoke-test project (token-bucket rate limiter) built by two Codex workers |
 

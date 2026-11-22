@@ -81,6 +81,7 @@ Codex writes rate limits into every session log (`~/.codex/sessions/**/*.jsonl`,
 2. `git clone https://github.com/HaochengBillYang/claude-project-test.git && cd claude-project-test && ./install.sh`. This installs the skill, the permission rules and the plugin (user scope); `--no-plugin` skips the plugin.
 3. Check the model: run `~/.claude/skills/codex/scripts/codex-usage.sh` after one Codex run, and look in `~/.codex/models_cache.json` for `gpt-6.2-sol`. If the account lacks it, change `-m` in `codex-run.sh`.
 4. GUI: in the Codex app, go to Settings → Computer Use → Always-allowed. Add Calculator and Google Chrome (or type `@Computer open <App>` and choose **Always allow**). Grant macOS Accessibility and Screen Recording to "Codex Computer Use". Smoke test: ask Claude to have Codex compute 1234 × 56 in Calculator (expected 69,104).
+   Then verify the whole setup: `tests/e2e.sh --gui` (one real Codex run, plus one GUI run; about 1-2% of the 5h window).
 5. Optional: tell Claude about the delegation preference so it is saved to memory. The skill's description already makes Claude pick it up.
 6. If Xcode Command Line Tools are missing, avoid `python3` (it triggers an install prompt). The skill only needs bash, jq and the Codex CLI.
 
