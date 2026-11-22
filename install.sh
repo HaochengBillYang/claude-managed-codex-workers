@@ -12,7 +12,7 @@ SKILL_DST=$CLAUDE_DIR/skills/codex
 SETTINGS=$CLAUDE_DIR/settings.json
 STAMP=$(date +%Y%m%d-%H%M%S)
 WITH_PLUGIN=yes
-PLUGIN_SOURCE=HaochengBillYang/claude-project-test
+PLUGIN_SOURCE=HaochengBillYang/claude-managed-codex-workers
 for arg in "$@"; do
   case $arg in
     --no-plugin) WITH_PLUGIN=no ;;
@@ -75,7 +75,7 @@ if [ "$WITH_PLUGIN" = yes ]; then
     claude plugin install codex-workers --marketplace "$PLUGIN_SOURCE" --scope user \
       || warn "Plugin install failed; run it by hand (see README)."
     # On a re-run the plugin is already installed; re-record its version so `claude plugin list` is current.
-    claude plugin update codex-workers@claude-project-test >/dev/null 2>&1 || true
+    claude plugin update codex-workers@claude-managed-codex-workers >/dev/null 2>&1 || true
   else
     warn "claude CLI not on PATH; install the plugin by hand (see README)."
   fi
