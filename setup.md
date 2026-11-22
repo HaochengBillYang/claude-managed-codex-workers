@@ -45,9 +45,21 @@ Codex writes rate limits into every session log (`~/.codex/sessions/**/*.jsonl`,
 - jq: `winget install jqlang.jq`. Git Bash cannot see winget's `Links` alias, so the scripts also look under `%LOCALAPPDATA%\Microsoft\WinGet\Packages\jqlang.jq_*\jq.exe`. jq.exe writes CRLF, which the scripts strip.
 - `.gitattributes` keeps `*.sh` files LF. With `core.autocrlf=true`, a clone made before that file existed has CRLF scripts that Git Bash rejects. Fix it with `git rm --cached -r . && git reset --hard`, or re-clone.
 - Run records store native `C:/...` paths (`cygpath -m`) so the plugin can read them. The pid is an MSYS pid. On Windows the plugin runs `codex-usage.sh` and its `kill -0` liveness check through Git Bash: `$CLAUDE_CODE_GIT_BASH_PATH`, else `C:/Program Files/Git/bin/bash.exe`, never WSL's `System32\bash.exe`.
+- Why `bash -c 'kill -0 <pid>'` rather than recording the Windows PID for `tasklist`: every Git Bash process shares one MSYS process table, so a fresh `bash.exe` sees the wrapper's `$!` (verified). The record format stays the same on both platforms, the mac stderr parsing ("No such process") still applies, and the plugin avoids `tasklist`'s locale-dependent output. The cost is one `bash.exe` start per check, about 0.1 s, at most every 5 s while a worker runs.
+- Verified on Windows with a stub `CODEX_BIN`: `$!`/`wait` pass the child's exit code through (`exit 3` gives `status=failed exit_code=3`), and killing the wrapper gives `status=killed exit_code=130` and terminates the child.
 - Install the plugin from a local checkout with `./install.sh --local`. Use this while the Windows changes are not on GitHub `main`.
 - Ruby smoke test: minitest 6 moved `minitest/mock` into a separate gem, so run `gem install minitest-mock`. If minitest 5 is also installed, RubyGems can resolve `minitest/mock` to v5 and fail. In that case run `ruby -e 'gem "minitest-mock"; load "test/test_rate_limiter.rb"' -Ilib` or remove the old minitest.
-- GUI/computer use is not verified on Windows yet.
+- GUI/computer use (Codex app 26.1117, CLI 0.171.0-alpha.13, 2026-11-21), **not working headless yet**:
+  - Headless `codex exec` uses the `@oai/sky` tool through `mcp__node_repl__js` (`sky.list_apps()`, `sky.launch_app({ app })`, `sky.get_window`, `sky.get_window_state`). Store apps are identified by AUMID, for example `Microsoft.WindowsCalculator_8wekyb3d8bbwe!App`.
+  - Approving an app in the Codex app (Settings → Computer Use → Always-allowed) writes a **table** to `%USERPROFILE%\.codex\config.toml`:
+    ```toml
+    [computer_use.windows.always_allowed_app_ids]
+    "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App" = true
+    "chrome.exe" = true
+    ```
+    The docs describe an array (`always_allowed_app_ids = [...]`), which is the mismatch reported in openai/codex#49484. Store apps are keyed by AUMID, desktop apps by exe name.
+  - Headless runs still fail with `Computer Use was not approved to use Calculator`, both with the app-written table and with the array shape passed as `-c computer_use.windows.always_allowed_app_ids=[...]`.
+  - Keep the GUI acceptance item open until a headless run succeeds.
 
 ## Seeing workers live
 - `codex-run.sh` writes a run record per worker to `~/.claude/codex-runs/<id>.json` (status, pid, effort, batch, timings) and streams Codex JSON events to `<brief>.md.events.jsonl`. Set `CODEX_BATCH="<name>"` to group parallel workers into one workflow.
