@@ -20,6 +20,7 @@ let USAGE_SCRIPT = ''
 let GIT_BASH = ''
 const DEFAULT_GIT_BASH = 'C:/Program Files/Git/bin/bash.exe'
 const RUN_FILE = /^\d{8}-\d{6}-\d+\.json$/
+const ABSOLUTE_PATH = /^(?:\/|[A-Za-z]:[\\/])/
 const TAIL_BYTES = 64 * 1024
 const PANE_WINDOW = 30 * 60
 const BAND_WINDOW = 60
@@ -70,8 +71,8 @@ export function parseRun(text: string, id: string): RunRecord | undefined {
     || typeof started_at !== 'number' || !Number.isFinite(started_at)
     || (ended_at !== null && (typeof ended_at !== 'number' || !Number.isFinite(ended_at)))
     || (exit_code !== null && (typeof exit_code !== 'number' || !Number.isInteger(exit_code)))
-    || typeof events !== 'string' || !events.startsWith('/')
-    || typeof result !== 'string' || !result.startsWith('/')) return undefined
+    || typeof events !== 'string' || !ABSOLUTE_PATH.test(events)
+    || typeof result !== 'string' || !ABSOLUTE_PATH.test(result)) return undefined
   return { id, name, batch, effort, sandbox, pid, status, started_at, ended_at, exit_code, events, result }
 }
 
@@ -243,7 +244,7 @@ async function readActivity($: EngineInterface, path: string): Promise<string | 
 async function checkPid($: EngineInterface, pid: number): Promise<boolean | undefined> {
   // codex-run.sh records the pid from its own shell: an MSYS pid on Windows, which only Git Bash can see.
   const argv = GIT_BASH ? [GIT_BASH, '-c', 'kill -0 ' + String(pid)] : ['/bin/kill', '-0', String(pid)]
-  const result = await $.process.run(argv, { timeoutMs: GIT_BASH ? 5000 : 1000 })
+  const result = await $.process.run(argv, { timeoutMs: GIT_BASH ? 2000 : 1000 })
   if (result.exitCode === 0) return true
   // A permission error still establishes that the process exists.
   if (/operation not permitted|permission denied/i.test(result.stderr)) return true
@@ -442,11 +443,13 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const windows = await $.session.machine().then(m => m.sysname === 'Windows_NT', () => false)
     if (windows) {
-      GIT_BASH = ((await $.env.get('CLAUDE_CODE_GIT_BASH_PATH')) || DEFAULT_GIT_BASH).replace(/\\/g, '/')
+      const bash = await $.env.get('CLAUDE_CODE_GIT_BASH_PATH').catch(() => undefined)
+      GIT_BASH = (bash || DEFAULT_GIT_BASH).replace(/\\/g, '/')
     }
-    const home = ((await $.env.get('HOME')) || (windows ? await $.env.get('USERPROFILE') : '') || '')
-      .replace(/\\/g, '/').replace(/\/+$/, '')
-    if (home) {
+    const rawHome = (await $.env.get('HOME').catch(() => undefined))
+      || (windows ? await $.env.get('USERPROFILE').catch(() => undefined) : undefined)
+    if (rawHome) {
+      const home = (windows ? rawHome.replace(/\\/g, '/') : rawHome).replace(/\/+$/, '')
       RUNS_DIR = home + '/.claude/codex-runs'
       USAGE_SCRIPT = home + '/.claude/skills/codex/scripts/codex-usage.sh'
     }

@@ -232,10 +232,25 @@ test('run records reject partial data, mismatched ids and unsafe pids', () => {
   expect(parseRun(JSON.stringify({ ...RUN, pid: -1 }), RUN.id)).toBe(undefined)
 })
 
-for (const windows of [false, true] as const) test(
-  `the live poll drives the terminal pane, band, auto-open and command toggle (${windows ? 'Windows' : 'macOS'})`,
+test('run records require absolute events and result paths', () => {
+  for (const path of ['/x', 'C:/x', 'C:\\x']) {
+    const record = { ...RUN, events: path, result: path }
+    expect(parseRun(JSON.stringify(record), RUN.id)).toEqual(record)
+  }
+  for (const path of ['x', 'C:x']) {
+    expect(parseRun(JSON.stringify({ ...RUN, events: path }), RUN.id)).toBe(undefined)
+    expect(parseRun(JSON.stringify({ ...RUN, result: path }), RUN.id)).toBe(undefined)
+  }
+})
+
+for (const platform of ['macOS', 'Windows', 'Windows with Git Bash override and lost pid']) test(
+  `the live poll drives the terminal pane, band, auto-open and command toggle (${platform})`,
   async ($, on) => {
-  const GIT_BASH = 'C:/Program Files/Git/bin/bash.exe'
+  const windows = platform !== 'macOS'
+  const bashOverride = platform === 'Windows with Git Bash override and lost pid'
+  const GIT_BASH = bashOverride ? 'D:/Git/bin/bash.exe' : 'C:/Program Files/Git/bin/bash.exe'
+  const fixture = windows ? { ...RUN, events: 'C:' + RUN.events, result: 'C:' + RUN.result } : RUN
+  const windowsRunsDir = 'C:/Users/test/.claude/codex-runs'
   const pane = {
     plugin: 'codex-workers',
     component: 'Pane',
@@ -255,7 +270,7 @@ for (const windows of [false, true] as const) test(
       maxRows: 4, scroll: { offset: 0, bodyRows: 4 }, view: {},
     },
   } as const
-  let record = RUN
+  let record = fixture
   let now = 5000
   let isOpen = false
   let opens = 0
@@ -264,6 +279,7 @@ for (const windows of [false, true] as const) test(
   let measured = 0
   let claudeSnapshot = CLAUDE_USAGE
   let pidChecks = 0
+  let pidGone = false
   const tailReads: { offset?: number; length?: number }[] = []
   let tick = () => {}
   let timerRegistered = () => {}
@@ -289,23 +305,27 @@ for (const windows of [false, true] as const) test(
     })
   })
   on('clock.now', () => ({ value: now * 1000 }))
-  on('fs.list', () => ({
-    value: [{ name: RUN.id + '.json', kind: 'file', size: 1, mtimeMs: 0, isLink: false }],
-  }))
-  // On a Windows host the engine hands hooks native paths (C:\fixtures\...), so compare in POSIX form.
+  const forwardSlashes = (path: string) => path.replace(/\\/g, '/')
+  // The engine adds a drive to the macOS fixture paths when the test host is Windows.
   const posix = (path: string) => path.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
+  const hookPath = windows ? forwardSlashes : posix
+  on('fs.list', (_, e) => {
+    if (windows) expect(hookPath(e.path)).toBe(windowsRunsDir)
+    return { value: [{ name: RUN.id + '.json', kind: 'file', size: 1, mtimeMs: 0, isLink: false }] }
+  })
   on('fs.stat', (_, e) => {
-    expect(posix(e.path)).toBe(RUN.events)
+    expect(hookPath(e.path)).toBe(fixture.events)
     return { value: { kind: 'file', size: 70000, mtimeMs: 0, isLink: false } }
   })
   on('fs.read', (_, e) => {
-    const path = posix(e.path)
-    if (path === RUN.events) {
+    const path = hookPath(e.path)
+    if (path === fixture.events) {
       tailReads.push({ offset: e.offset, length: e.length })
       return { value: 'partial\n' + event({ type: 'command_execution', command: '/bin/zsh -lc "ls"' }) + '\n' }
     }
-    if (path === RUN.result) return { value: 'Added fixture tests\nFurther details' }
-    expect(path.endsWith('/' + RUN.id + '.json')).toBe(true)
+    if (path === fixture.result) return { value: 'Added fixture tests\nFurther details' }
+    if (windows) expect(path).toBe(windowsRunsDir + '/' + RUN.id + '.json')
+    else expect(path.endsWith('/' + RUN.id + '.json')).toBe(true)
     return { value: JSON.stringify(record) }
   })
   on('session.machine', () => ({
@@ -314,13 +334,21 @@ for (const windows of [false, true] as const) test(
   on('env.get', (_, e) => {
     // Windows sessions often have no HOME; the plugin falls back to USERPROFILE.
     const env: Record<string, string> = windows ? { USERPROFILE: 'C:\\Users\\test' } : { HOME: '/Users/test' }
+    if (bashOverride) env.CLAUDE_CODE_GIT_BASH_PATH = 'D:\\Git\\bin\\bash.exe'
     return { value: env[e.name] }
   })
   on('process.run', (_, e) => {
     const isKill = windows ? e.argv[1] === '-c' : e.argv[0] === '/bin/kill'
     if (isKill) {
       expect(e.argv).toEqual(windows ? [GIT_BASH, '-c', 'kill -0 4242'] : ['/bin/kill', '-0', '4242'])
+      expect(e.init?.timeoutMs).toBe(windows ? 2000 : 1000)
       pidChecks += 1
+      if (pidGone) {
+        return { value: {
+          exitCode: 1, stdout: '', stderr: 'bash: line 1: kill: (4242) - No such process',
+          isStdoutTruncated: false, isStderrTruncated: false,
+        } }
+      }
     } else {
       if (windows) {
         expect(e.argv).toEqual([GIT_BASH, 'C:/Users/test/.claude/skills/codex/scripts/codex-usage.sh'])
@@ -407,7 +435,7 @@ for (const windows of [false, true] as const) test(
   expect((await bandUi.find({ type: 'Text', text: /^Codex$/ }))?.props.color).toBe('yellow')
 
   // Let the first tick see a terminal record only one second later.
-  record = { ...RUN, status: 'done', exit_code: 0, ended_at: 5001 }
+  record = { ...fixture, status: 'done', exit_code: 0, ended_at: 5001 }
   now = 5001
   tick()
   expect(await waitForRow(/Added fixture tests/)).toMatch(/✓.*13:21/)
@@ -435,6 +463,19 @@ for (const windows of [false, true] as const) test(
   expect(isOpen).toBe(false)
   expect((await $.command.run(command)).text).toBe('Codex workers pane opened.')
   expect(opens).toBe(2)
+
+  if (bashOverride) {
+    record = fixture
+    pidGone = true
+    now = 5031
+    tick()
+    expect(await waitForRow(/pid 4242 gone/)).toMatch(/\? .*impl/)
+    expect(pidChecks).toBe(2)
+    expect(tailReads.length).toBe(1)
+    await bandUi.redraw()
+    expect(await bandText()).toMatch(/Codex 1 lost/)
+  }
+
   await paneUi.unmount()
   await bandUi.unmount()
 })
