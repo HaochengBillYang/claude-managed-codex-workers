@@ -58,8 +58,17 @@ Codex writes rate limits into every session log (`~/.codex/sessions/**/*.jsonl`,
     "chrome.exe" = true
     ```
     The docs describe an array (`always_allowed_app_ids = [...]`), which is the mismatch reported in openai/codex#49484. Store apps are keyed by AUMID, desktop apps by exe name.
-  - Headless runs still fail with `Computer Use was not approved to use Calculator`, both with the app-written table and with the array shape passed as `-c computer_use.windows.always_allowed_app_ids=[...]`.
-  - Keep the GUI acceptance item open until a headless run succeeds.
+  - Headless runs still fail with `Computer Use was not approved to use Calculator`. This happens with the app-written table, with the array shape passed as `-c computer_use.windows.always_allowed_app_ids=[...]`, and with the Codex app fully closed.
+  - Cause (from reading `@oai/sky` in `%LOCALAPPDATA%\OpenAI\Codex\runtimes\cua_node\…`):
+    - The Windows helper (`codex-computer-use.exe`) returns an `approvalRequest` for Calculator even though the app is always-allowed.
+    - `helper_transport.js` turns that request into an MCP elicitation ("Allow Codex to use Calculator?").
+    - Headless `codex exec` has no UI to answer the elicitation, so it is declined and the error above results.
+    - `codex.exe` itself contains no reference to `always_allowed_app_ids`, so only the desktop app's own elicitation handler honours the table.
+    - On macOS, by contrast, the helper checks its own persisted approvals and never asks for always-allowed apps, which is why headless GUI runs work there.
+  - Result: headless GUI is **blocked upstream on Windows** in this Codex build. Possible ways forward:
+    - wait for a Codex fix (report alongside openai/codex#49484);
+    - let a non-`never` approval policy for MCP elicitations, or Codex's auto-review, answer the prompt. That changes the delegation/sandbox policy, which `docs/windows-port.md` puts out of scope, so it needs the owner's decision.
+  - Use the Codex app interactively for GUI work on Windows until then.
 
 ## Seeing workers live
 - `codex-run.sh` writes a run record per worker to `~/.claude/codex-runs/<id>.json` (status, pid, effort, batch, timings) and streams Codex JSON events to `<brief>.md.events.jsonl`. Set `CODEX_BATCH="<name>"` to group parallel workers into one workflow.
