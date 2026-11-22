@@ -19,6 +19,10 @@ if [ -z "$JQ" ] && [ -n "${LOCALAPPDATA:-}" ]; then   # winget install jqlang.jq
   JQ=$(ls "$LOCALAPPDATA"/Microsoft/WinGet/Packages/jqlang.jq_*/jq.exe 2>/dev/null | head -1)
 fi
 JQ=${JQ:-/usr/bin/jq}
+if [ ! -x "$JQ" ]; then
+  echo 'codex-run: jq not found (winget install jqlang.jq / brew install jq)' >&2
+  exit 2
+fi
 RUNS_DIR=${CODEX_RUNS_DIR:-"$HOME/.claude/codex-runs"}
 BATCH=${CODEX_BATCH:-adhoc}
 EFFORT=$1
@@ -29,12 +33,16 @@ SBARGS=(-s "$SB")
 
 brief_path=$BRIEF
 workdir_path=$DIR
+codex_workdir=$DIR
+codex_result=$BRIEF.result
 case $brief_path in /*|[A-Za-z]:[/\\]*) ;; *) brief_path=$PWD/$brief_path;; esac
 case $workdir_path in /*|[A-Za-z]:[/\\]*) ;; *) workdir_path=$PWD/$workdir_path;; esac
 # On Windows, record native paths (C:/...) so non-MSYS readers such as the plugin can open them.
 if command -v cygpath >/dev/null 2>&1; then
   brief_path=$(cygpath -m -- "$brief_path")
   workdir_path=$(cygpath -m -- "$workdir_path")
+  codex_workdir=$(cygpath -m -- "$DIR")
+  codex_result=$(cygpath -m -- "$BRIEF.result")
 fi
 name=${BRIEF##*/}
 name=${name%.md}
@@ -47,7 +55,7 @@ started_at=${timestamp##* }
 record=$RUNS_DIR/$id.json
 
 write_record() {
-  "$JQ" -n \
+  MSYS2_ARG_CONV_EXCL='*' "$JQ" -n \
     --arg id "$id" --arg name "$name" --arg batch "$BATCH" \
     --arg brief "$brief_path" --arg workdir "$workdir_path" \
     --arg effort "$EFFORT" --arg sandbox "$SB" --argjson pid "$child_pid" \
@@ -59,7 +67,10 @@ write_record() {
       events: ($brief + ".events.jsonl"),
       result: ($brief + ".result"),
       log: ($brief + ".log")
-    }' > "$record.tmp" && mv -f -- "$record.tmp" "$record"
+    }' > "$record.tmp" && mv -f -- "$record.tmp" "$record" || {
+      printf 'codex-run: failed to write run record %s\n' "$record" >&2
+      return 1
+    }
 }
 
 prune_records() (
@@ -91,7 +102,7 @@ on_signal() {
 trap on_signal INT TERM HUP
 
 "$CODEX" exec --json -m gpt-6.2-sol -c "model_reasoning_effort=\"$EFFORT\"" "${SBARGS[@]}" \
-  --skip-git-repo-check -C "$DIR" -o "$BRIEF.result" - \
+  --skip-git-repo-check -C "$codex_workdir" -o "$codex_result" - \
   < "$BRIEF" > "$BRIEF.events.jsonl" 2> "$BRIEF.log" &
 child_pid=$!
 if [[ -n $interrupted ]]; then

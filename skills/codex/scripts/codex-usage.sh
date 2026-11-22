@@ -1,37 +1,62 @@
 #!/bin/bash
 # Prints Codex rate-limit status from the newest session log that has it.
-# Last line is machine-readable: STATUS=OK|THROTTLE|BLOCKED [UNTIL=..] [RESETS=n] [ADVICE=..] [REASON=..]
+# Last line is machine-readable: STATUS=OK|THROTTLE|BLOCKED|UNKNOWN [UNTIL=..] [RESETS=n] [ADVICE=..] [REASON=..]
 # Banked resets (not exposed by the Codex CLI) are read from $CODEX_RESETS_FILE
 # (default ~/.claude/codex-resets.json): {"available": 2, "expires": "2026-12-01", "updated": "2026-11-21"}
 set -u
+unknown() {
+  printf '%s\n' "$1" 'STATUS=UNKNOWN'
+  exit 0
+}
+
 # Portable across macOS (BSD date/stat) and Windows Git Bash / Linux (GNU date/stat).
 JQ_BIN=$(command -v jq || true)
 if [ -z "$JQ_BIN" ] && [ -n "${LOCALAPPDATA:-}" ]; then   # winget install jqlang.jq (its Links alias is invisible to MSYS)
   JQ_BIN=$(ls "$LOCALAPPDATA"/Microsoft/WinGet/Packages/jqlang.jq_*/jq.exe 2>/dev/null | head -1)
 fi
 JQ_BIN=${JQ_BIN:-/usr/bin/jq}
+[ -x "$JQ_BIN" ] || unknown 'jq not found (winget install jqlang.jq / brew install jq)'
 jq() { "$JQ_BIN" "$@" | tr -d '\r'; }   # jq.exe on Windows emits CRLF
 mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
 epoch_fmt() { date -d "@$1" "$2" 2>/dev/null || date -r "$1" "$2"; }   # epoch format
 day_end_epoch() { date -d "$1 23:59:59" +%s 2>/dev/null || date -j -f "%Y-%m-%d %H:%M:%S" "$1 23:59:59" +%s 2>/dev/null || echo 0; }
 NOW=$(date +%s)
 f=""
-for c in $(ls -t $(find "$HOME/.codex/sessions" -name '*.jsonl' 2>/dev/null) 2>/dev/null | head -40); do
+while IFS= read -r c; do
   grep -q '"rate_limits"' "$c" && { f=$c; break; }
-done
-[ -z "$f" ] && { echo "No Codex usage snapshot found (run any codex task first)."; echo "STATUS=UNKNOWN"; exit 0; }
-rl=$(grep '"rate_limits"' "$f" | tail -1 | jq -c '.. | objects | select(has("rate_limits")) | .rate_limits' | tail -1)
+done < <(
+  find "$HOME/.codex/sessions" -name '*.jsonl' -print0 2>/dev/null |
+    while IFS= read -r -d '' candidate; do
+      snap=$(mtime "$candidate") || continue
+      printf '%s\t%s\n' "$snap" "$candidate"
+    done | sort -rn | head -40 | cut -f2-
+)
+[ -n "$f" ] || unknown 'No Codex usage snapshot found (run any codex task first).'
+line=$(grep '"rate_limits"' "$f" | tail -1)
+rl=$(set -o pipefail; jq -c '.. | objects | select(has("rate_limits")) | .rate_limits' <<<"$line" 2>/dev/null | tail -1) &&
+  [ -n "$rl" ] || unknown 'Could not parse Codex rate limits from the usage snapshot.'
 snap=$(mtime "$f")
 age=$(( (NOW - snap) / 60 ))
 fmt() { epoch_fmt "$1" '+%a %b %d %H:%M'; }
 win() { # name json -> sets U (effective used %), R (reset epoch), E (elapsed % of window)
-  local u r w; u=$(jq -r ".$1.used_percent // 0" <<<"$rl"); r=$(jq -r ".$1.resets_at // 0" <<<"$rl"); w=$(jq -r ".$1.window_minutes // 0" <<<"$rl")
+  local values u r w
+  values=$(set -o pipefail; jq -er --arg window "$1" '
+    .[$window] |
+    select((.used_percent | type) == "number" and (.resets_at | type) == "number") |
+    [(.used_percent | if . < 0 then ceil else floor end), (.resets_at | floor),
+     (.window_minutes // 0 | floor)] | @tsv
+  ' <<<"$rl" 2>/dev/null) || return 1
+  IFS=$'\t' read -r u r w <<<"$values"
+  [[ $u =~ ^-?[0-9]+$ && $r =~ ^-?[0-9]+$ && $w =~ ^-?[0-9]+$ ]] || return 1
   if [ "$r" -gt 0 ] && [ "$NOW" -ge "$r" ]; then u=0; r=$(( r + w*60 )); fi   # window already reset since snapshot
-  U=${u%.*}; R=$r
-  E=$(( w>0 ? (100 - (R-NOW)*100/(w*60)) : 0 )); [ $E -lt 0 ] && E=0
+  U=$u; R=$r
+  E=$(( w>0 ? (100 - (R-NOW)*100/(w*60)) : 0 ))
+  if [ "$E" -lt 0 ]; then E=0; fi
 }
-win primary;   PU=$U; PR=$R
-win secondary; WU=$U; WR=$R; WE=$E
+win primary || unknown 'Invalid primary window in the Codex usage snapshot.'
+PU=$U; PR=$R
+win secondary || unknown 'Invalid secondary window in the Codex usage snapshot.'
+WU=$U; WR=$R; WE=$E
 echo "Codex usage (snapshot ${age} min old)"
 echo "  5-hour window: ${PU}% used, resets $(fmt $PR)"
 echo "  Weekly window: ${WU}% used (${WE}% of week elapsed), resets $(fmt $WR)"
