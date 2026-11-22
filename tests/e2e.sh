@@ -1,5 +1,5 @@
 #!/bin/bash
-# End-to-end check of the Claude ⇄ Codex worker setup on this machine (macOS).
+# End-to-end check of the Claude ⇄ Codex worker setup on this machine (macOS, or Windows under Git Bash).
 # Spends a real Codex run (~1% of the 5h window); --gui adds a Calculator run.
 #   tests/e2e.sh [--gui] [--keep]
 set -u
@@ -16,13 +16,23 @@ bad()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
 check(){ local d=$1; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d"; fi; }
 cleanup() { [ $KEEP = yes ] && echo "kept: $WORK" || rm -rf "$WORK"; }
 trap cleanup EXIT
+# Same jq discovery as the skill scripts (Git Bash can't see winget's Links alias).
+JQ=$(command -v jq || true)
+if [ -z "$JQ" ] && [ -n "${LOCALAPPDATA:-}" ]; then
+  JQ=$(ls "$LOCALAPPDATA"/Microsoft/WinGet/Packages/jqlang.jq_*/jq.exe 2>/dev/null | head -1)
+fi
+JQ=${JQ:-jq}
+# Run records store native paths on Windows (cygpath -m), so match against that form.
+WORK_REC=$WORK
+command -v cygpath >/dev/null 2>&1 && WORK_REC=$(cygpath -m "$WORK")
 
 echo "== 1. Install"
-check "jq available" command -v jq
+check "jq available" test -x "$JQ"
 check "skill installed" test -x "$SCRIPTS/codex-run.sh" -a -x "$SCRIPTS/codex-usage.sh"
 check "installed skill matches repo" diff -rq "$REPO/skills/codex" "$HOME/.claude/skills/codex"
 if command -v claude >/dev/null; then
-  check "codex-workers plugin installed and enabled" sh -c 'claude plugin list 2>/dev/null | grep -A3 "codex-workers@" | grep -q enabled'
+  # Read the entry's Status: line (a folder-marketplace install adds a "Read from:" line before it).
+  check "codex-workers plugin installed and enabled" sh -c 'claude plugin list 2>/dev/null | awk "/codex-workers@/{f=1} f && /Status:/{print; exit}" | grep -q enabled'
 else bad "claude CLI on PATH"; fi
 
 echo "== 2. Usage budget"
@@ -49,17 +59,17 @@ check "worker wrote the file" sh -c "[ \"\$(cat '$WORK/e2e.txt' 2>/dev/null)\" =
 check "result file is non-empty" test -s "$WORK/brief-e2e.md.result"
 check "event stream has thread.started" grep -q '"thread.started"' "$WORK/brief-e2e.md.events.jsonl"
 check "event stream has turn.completed" grep -q '"turn.completed"' "$WORK/brief-e2e.md.events.jsonl"
-rec=$(grep -l "\"brief\": \"$WORK/brief-e2e.md\"" "$RUNS"/*.json 2>/dev/null | head -1)
+rec=$(grep -l "\"brief\": \"$WORK_REC/brief-e2e.md\"" "$RUNS"/*.json 2>/dev/null | head -1)
 check "run record written" test -n "$rec"
 [ -n "$rec" ] && check "run record: batch=e2e, status=done, exit_code=0" \
-  jq -e '.batch=="e2e" and .status=="done" and .exit_code==0 and .ended_at!=null' "$rec"
+  "$JQ" -e '.batch=="e2e" and .status=="done" and .exit_code==0 and .ended_at!=null' "$rec"
 check "wrapper printed usage afterwards" grep -q '^STATUS=' "$WORK/run.out"
 
 if [ $GUI = yes ]; then
   echo "== 4. GUI (Calculator, always-allowed)"
   cat > "$WORK/brief-gui.md" <<'EOF'
 # Task
-Using computer use (cua.getApp for Calculator), compute 1234 × 56 by clicks or keystrokes, read the display, then quit Calculator. Do not use shell commands for the math.
+Using computer use, open Calculator (macOS: cua.getApp; Windows: sky.launch_app with calc.exe, then activate_window), compute 1234 × 56 by clicks or keystrokes, read the display, then quit Calculator. Do not use shell commands for the math.
 # Report back
 Only the number shown on the display, digits only, no separators. If blocked, the exact error.
 EOF
