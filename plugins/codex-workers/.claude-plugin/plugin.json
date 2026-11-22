@@ -1,0 +1,10 @@
+{
+  "name": "codex-workers",
+  "version": "0.1.0",
+  "description": "Live workflow view of Codex (GPT) workers launched by codex-run.sh",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "HaochengBillYang"
+  },
+  "homepage": "https://github.com/HaochengBillYang/claude-project-test"
+}

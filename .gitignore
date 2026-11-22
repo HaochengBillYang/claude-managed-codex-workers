@@ -1,3 +1,5 @@
 .DS_Store
 *.local.json
 .env
+.codex-briefs/
+plugins/*/.claude-plugin/types/

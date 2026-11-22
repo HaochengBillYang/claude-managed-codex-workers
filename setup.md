@@ -9,11 +9,12 @@ Last updated: 2026-11-21. Source of truth if a chat is lost or compacted.
 ## Components
 | What | Where |
 |---|---|
-| Codex CLI (bundled in ChatGPT.app, not on PATH) | `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex` (v0.171.0-alpha.13) |
-| Delegation skill (rules, brief template, review checklist) | `~/.claude/skills/codex/SKILL.md` |
-| Run wrapper | `~/.claude/skills/codex/scripts/codex-run.sh <low\|medium> <read-only\|workspace-write> <workdir> <brief.md>` → `<brief>.md.result`, `<brief>.md.log` |
+| Codex CLI | Bundled in ChatGPT.app at `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex` (not on PATH; v0.171.0-alpha.13 here). The wrapper falls back to `codex` on PATH, or `$CODEX_BIN`. |
+| Delegation skill (rules, brief template, review checklist) | `~/.claude/skills/codex/SKILL.md`. Source: `skills/codex/` in this repo; `install.sh` copies it over. |
+| Run wrapper | `~/.claude/skills/codex/scripts/codex-run.sh <low\|medium> <read-only\|workspace-write> <workdir> <brief.md>` → `<brief>.md.result`, `<brief>.md.log`, `<brief>.md.events.jsonl`, plus a run record in `~/.claude/codex-runs/` |
 | Usage checker | `~/.claude/skills/codex/scripts/codex-usage.sh` (last line: `STATUS=OK\|THROTTLE\|BLOCKED UNTIL=<epoch>\|UNKNOWN`) |
-| Permission allow rules for both scripts | `~/.claude/settings.json` (added by user; Claude may not edit its own permissions) |
+| Permission allow rules for both scripts | `~/.claude/settings.json`. Added by the user or by `install.sh`; Claude may not edit its own permissions. |
+| Worker visualizer plugin | `codex-workers`, installed at user scope from this repo's marketplace. Source: `plugins/codex-workers/`. |
 | Claude memory | `~/.claude/projects/-Users-xseven/memory/` (`codex-delegation.md`, `github-account.md`) |
 | GitHub | https://github.com/HaochengBillYang |
 
@@ -37,10 +38,10 @@ Codex writes rate limits into every session log (`~/.codex/sessions/**/*.jsonl`,
 ## Machine quirks
 - No Xcode Command Line Tools: `python3`/`git`-adjacent dev tools may trigger an install prompt. Available: Ruby 2.6 (with minitest), Perl 5.34, bash/zsh, `jq`. Codex's bundled Node: `~/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node`.
 
-## Seeing workers live (in progress)
+## Seeing workers live
 - `codex-run.sh` writes a run record per worker to `~/.claude/codex-runs/<id>.json` (status, pid, effort, batch, timings) and streams Codex JSON events to `<brief>.md.events.jsonl`. Set `CODEX_BATCH="<name>"` to group parallel workers into one workflow.
 - Launch each worker with the Bash tool's `run_in_background: true` so it shows as a native background shell.
-- The `codex-workers` Claude Code mod (being built: `~/.claude/dev-mods/<session>/codex-workers/`, design in `docs/codex-workers-design.md`) draws a workflow pane plus a status row above the prompt from those records. Toggle it with `/codex-workers`.
+- The `codex-workers` plugin (`plugins/codex-workers/`, design in `docs/codex-workers-design.md`) draws a workflow pane plus a status row above the prompt from those records. Toggle it with `/codex-workers`.
 
 ## Workflow per task
 1. Claude: `codex-usage.sh` → check status.
@@ -51,3 +52,15 @@ Codex writes rate limits into every session log (`~/.codex/sessions/**/*.jsonl`,
 
 ## Smoke-test record
 2026-11-21, repo `claude-project-test`, branch `smoke/rate-limiter`: a token-bucket rate limiter (`DESIGN.md`, `lib/`, `test/`). Two parallel workers built the implementation and black-box tests. 21 tests passed on the first run, 8 of 8 planted bugs were caught, and one spec defect (Float-only `rate`) was fixed by Claude. The run cost about 1% of the 5-hour window.
+
+## New machine
+1. Install Claude Code and either the ChatGPT desktop app (it bundles Codex) or the standalone `codex` CLI. Sign in to Codex once.
+2. `git clone https://github.com/HaochengBillYang/claude-project-test.git && cd claude-project-test && ./install.sh`. This installs the skill, the permission rules and the plugin (user scope); `--no-plugin` skips the plugin.
+3. Check the model: run `~/.claude/skills/codex/scripts/codex-usage.sh` after one Codex run, and look in `~/.codex/models_cache.json` for `gpt-6.2-sol`. If the account lacks it, change `-m` in `codex-run.sh`.
+4. GUI: in the Codex app, go to Settings → Computer Use → Always-allowed. Add Calculator and Google Chrome (or type `@Computer open <App>` and choose **Always allow**). Grant macOS Accessibility and Screen Recording to "Codex Computer Use". Smoke test: ask Claude to have Codex compute 1234 × 56 in Calculator (expected 69,104).
+5. Optional: tell Claude about the delegation preference so it is saved to memory. The skill's description already makes Claude pick it up.
+6. If Xcode Command Line Tools are missing, avoid `python3` (it triggers an install prompt). The skill only needs bash, jq and the Codex CLI.
+
+## Updating
+- Edit the skill or plugin in this repo, then re-run `./install.sh`. For the plugin, run `claude plugin marketplace update claude-project-test` (or reinstall) once the change is pushed.
+- Git operations (commit, push, repo settings) are handled by the separate **Github Repo Manager** Claude session.

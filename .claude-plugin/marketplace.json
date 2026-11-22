@@ -1,0 +1,11 @@
+{
+  "name": "claude-project-test",
+  "owner": { "name": "HaochengBillYang" },
+  "plugins": [
+    {
+      "name": "codex-workers",
+      "source": "./plugins/codex-workers",
+      "description": "Live workflow view of Codex (GPT) workers launched by the codex skill's codex-run.sh"
+    }
+  ]
+}
