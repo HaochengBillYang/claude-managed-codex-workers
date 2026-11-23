@@ -130,6 +130,21 @@ test('the band drops context, drops the hint, compacts and then truncates', () =
   expect(layout(compact.length - 1)).toBe('C 23%/41% │ X idle 17%/1…')
   expect(layout(1)).toBe('…')
   expect(layout(0)).toBe('')
+
+  const withResets = parseUsage('5-hour window: 17% used, resets 23:10\nWeekly window: 17% used, resets Tue 14:49\nSTATUS=OK RESETS=2 ADVICE=REDEEM_OPTIONAL')
+  const resetLayout = (columns: number) => layoutBand([], 5000, claude, withResets, columns)
+  const wideWithResets = wide.replace(' │ /codex-workers', ' · ↺2 │ /codex-workers')
+  for (const [columns, expected] of [
+    [wideWithResets.length, wideWithResets],
+    [wide.length, noContext.replace(' │ /codex-workers', ' · ↺2 │ /codex-workers')],
+    [noContext.length - 1, noHint + ' · ↺2'],
+    [noHint.length - 1, compact + ' ↺2'],
+    [compact.length, 'C 23%/41% │ X idle 17%… ↺2'],
+  ] as const) {
+    const row = resetLayout(columns)
+    expect(row.map(segment => segment.text).join('')).toBe(expected)
+    expect(row.find(segment => segment.text === '↺2')?.color).toBe('yellow')
+  }
 })
 
 test('the band keeps worker summaries and displays missing figures', () => {
@@ -205,6 +220,8 @@ test('usage reads percentages, reset labels and machine status details', () => {
   expect(parseUsage(windows + '\nSTATUS=OK\n')).toEqual({
     fiveHour: { percent: 9, resets: 'Sat Nov 21 23:10' },
     weekly: { percent: 16, resets: 'Tue Nov 24 14:49' },
+    resets: null,
+    advice: null,
     status: 'OK',
     until: null,
     reason: null,
@@ -212,10 +229,29 @@ test('usage reads percentages, reset labels and machine status details', () => {
   expect(parseUsage('STATUS=THROTTLE REASON=weekly ahead').status).toBe('THROTTLE')
   expect(parseUsage('STATUS=THROTTLE REASON=weekly ahead').reason).toBe('weekly ahead')
   expect(parseUsage('STATUS=BLOCKED UNTIL=1795300212 REASON=5h_limit')).toEqual({
-    fiveHour: null, weekly: null, status: 'BLOCKED', until: 1795300212, reason: '5h_limit',
+    fiveHour: null, weekly: null, resets: null, advice: null,
+    status: 'BLOCKED', until: 1795300212, reason: '5h_limit',
   })
   expect(parseUsage('No snapshot available\nSTATUS=UNKNOWN').status).toBe('UNKNOWN')
   expect(parseUsage('truncated output').status).toBe('UNKNOWN')
+})
+
+test('usage reads banked resets, optional expiry and redemption advice', () => {
+  const usage = parseUsage([
+    '  Banked resets: 2 (expire Tue Dec 01) - restore 5h + weekly; user redeems via Codex Usage settings or /usage',
+    'STATUS=BLOCKED UNTIL=1795300212 RESETS=3 ADVICE=REDEEM_BEFORE_EXPIRY REASON=5h limit',
+  ].join('\n'))
+  expect(usage.resets).toEqual({ count: 2, expires: 'Tue Dec 01' })
+  expect(usage.advice).toBe('REDEEM_BEFORE_EXPIRY')
+  expect(usage.until).toBe(1795300212)
+  expect(usage.reason).toBe('5h limit')
+  expect(parseUsage('  Banked resets: 1 - restore 5h + weekly\nSTATUS=OK').resets)
+    .toEqual({ count: 1, expires: null })
+  expect(parseUsage('STATUS=OK RESETS=3').resets).toEqual({ count: 3, expires: null })
+  expect(parseUsage('STATUS=OK RESETS=0').resets).toBe(null)
+  const reasonOnly = parseUsage('STATUS=OK REASON=mentions RESETS=3 ADVICE=REDEEM_OPTIONAL')
+  expect(reasonOnly.resets).toBe(null)
+  expect(reasonOnly.advice).toBe(null)
 })
 
 test('a dead running pid becomes lost until a live check or a final record supersedes it', () => {
@@ -310,7 +346,7 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
     requestId: 'codex-workers',
     surface: 'terminal',
     props: {
-      title: 'Codex workers', bodyColumns: 96, isFocused: false, placement: 'dock',
+      title: 'Codex workers', bodyColumns: 144, isFocused: false, placement: 'dock',
       scroll: { offset: 0, bodyRows: 20 }, view: {},
     },
   } as const
@@ -398,7 +434,10 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
     const stdout = isKill ? '' : [
       '5-hour window: 9% used, resets Sat Nov 21 23:10',
       'Weekly window: 16% used, resets Tue Nov 24 14:49',
-      record.status === 'running' ? 'STATUS=THROTTLE REASON=weekly pace' : 'STATUS=OK',
+      ...(record.status === 'running' ? [
+        '  Banked resets: 2 (expire Tue Dec 01) - restore 5h + weekly',
+        'STATUS=THROTTLE RESETS=2 ADVICE=REDEEM_BEFORE_EXPIRY REASON=weekly pace',
+      ] : ['STATUS=OK']),
     ].join('\n')
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -464,18 +503,21 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   expect((await paneUi.find({ type: 'Box', text: /^Claude  / }))?.text)
     .toMatch(/^Claude  5h  █{7}░{3}  70%  resets \d{2}:\d{2}  wk —  ctx 91%$/)
   expect((await paneUi.find({ type: 'Box', text: /^Codex  / }))?.text)
-    .toBe('Codex  5h  █░░░░░░░░░  9%  resets 23:10  wk  ██░░░░░░░░  16%  resets Tue 14:49  THROTTLE')
+    .toBe('Codex  5h  █░░░░░░░░░  9%  resets 23:10  wk  ██░░░░░░░░  16%  resets Tue 14:49  THROTTLE  ↺2  next expires Tue Dec 01  redeem before expiry')
+  expect((await paneUi.find({ type: 'Text', text: /^↺2$/ }))?.props.color).toBe('yellow')
   expect((await paneUi.find({ type: 'Text', text: /^70%$/ }))?.props.color).toBe('yellow')
   await paneUi.redraw({ ...pane.props, bodyColumns: 30 })
   expect((await paneUi.find({ type: 'Box', text: /^5h.*70%/ }))?.text).toMatch(/resets \d{2}:\d{2}$/)
   expect((await paneUi.find({ type: 'Box', text: /^wk —$/ }))?.text).toBe('wk —')
+  expect((await paneUi.find({ type: 'Box', text: /^↺2/ }))?.text).toBe('↺2  next expires Tue Dec 01')
+  expect((await paneUi.find({ type: 'Box', text: /^redeem before expiry$/ }))?.text).toBe('redeem before expiry')
   await paneUi.redraw(pane.props)
   await firstOpen
   expect(opens).toBe(1)
   expect(pidChecks).toBe(1)
   expect(tailReads).toEqual([{ offset: 4464, length: 65536 }])
   await bandUi.redraw()
-  expect(await bandText()).toMatch(/Codex ⠋ 1 running · 5h 9% · wk 16% │ \/codex-workers/)
+  expect(await bandText()).toMatch(/Codex ⠋ 1 running · 5h 9% · wk 16% · ↺2/)
   expect((await bandUi.find({ type: 'Text', text: /^Codex$/ }))?.props.color).toBe('yellow')
 
   // Let the first tick see a terminal record only one second later.

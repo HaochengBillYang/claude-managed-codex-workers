@@ -1,8 +1,9 @@
 #!/bin/bash
 # Prints Codex rate-limit status from the newest session log that has it.
 # Last line is machine-readable: STATUS=OK|THROTTLE|BLOCKED [UNTIL=..] [RESETS=n] [ADVICE=..] [REASON=..]
-# Banked resets (not exposed by the Codex CLI) are read from $CODEX_RESETS_FILE
-# (default ~/.claude/codex-resets.json): {"available": 2, "expires": "2026-12-01", "updated": "2026-11-21"}
+# Banked resets come from the Codex app-server (account/rateLimits/read), cached in
+# $CODEX_RESETS_FILE (default ~/.claude/codex-resets.json) by codex-resets-refresh.sh.
+# A cache older than 10 min is refreshed in the background, so this script never waits on it.
 set -u
 NOW=$(date +%s)
 f=""
@@ -26,6 +27,12 @@ echo "Codex usage (snapshot ${age} min old)"
 echo "  5-hour window: ${PU}% used, resets $(fmt $PR)"
 echo "  Weekly window: ${WU}% used (${WE}% of week elapsed), resets $(fmt $WR)"
 RESETS_FILE=${CODEX_RESETS_FILE:-$HOME/.claude/codex-resets.json}
+REFRESH="$(dirname "$0")/codex-resets-refresh.sh"
+rupd=$(jq -r ".updated // 0" "$RESETS_FILE" 2>/dev/null || echo 0)
+case $rupd in ""|*[!0-9]*) rupd=0;; esac   # hand-written files may hold a date string
+if [ -x "$REFRESH" ] && [ $(( NOW - rupd )) -gt 600 ]; then
+  ( "$REFRESH" >/dev/null 2>&1 & ) 2>/dev/null
+fi
 RN=0; REXP=0
 if [ -f "$RESETS_FILE" ]; then
   RN=$(jq -r ".available // 0" "$RESETS_FILE" 2>/dev/null || echo 0)

@@ -118,3 +118,11 @@ STATUS=OK            (or THROTTLE REASON=… / BLOCKED UNTIL=<epoch> REASON=… 
 
 ### Version
 - `plugin.json` version `0.2.0`.
+
+## v0.2.3 (banked resets)
+
+Contract C can include a `Banked resets:` line with a count and optional expiry.
+The status line can include `RESETS=N` and `ADVICE=` before `REASON=`. The
+banked line takes precedence for the count. The band keeps the count as it
+narrows, and the pane shows the count, expiry when available, and redemption
+advice. Advice highlights the reset indicator in yellow.

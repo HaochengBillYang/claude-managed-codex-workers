@@ -31,6 +31,8 @@ export type UsageWindow = { percent: number; resets: string }
 export type CodexUsage = {
   fiveHour: UsageWindow | null
   weekly: UsageWindow | null
+  resets: { count: number; expires: string | null } | null
+  advice: string | null
   status: 'OK' | 'THROTTLE' | 'BLOCKED' | 'UNKNOWN'
   until: number | null
   reason: string | null

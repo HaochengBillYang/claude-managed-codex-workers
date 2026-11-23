@@ -41,7 +41,6 @@ Touch nothing else. Do not commit.
 # Report back
 The output of `cat e2e.txt`.
 EOF
-before=$(ls "$RUNS" 2>/dev/null | wc -l)
 CODEX_BATCH="e2e" "$SCRIPTS/codex-run.sh" low workspace-write "$WORK" "$WORK/brief-e2e.md" > "$WORK/run.out" 2>&1
 rc=$?
 check "codex-run.sh exited 0" test $rc -eq 0

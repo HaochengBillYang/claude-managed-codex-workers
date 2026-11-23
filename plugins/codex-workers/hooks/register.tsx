@@ -25,6 +25,8 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const UNKNOWN_USAGE: CodexUsage = {
   fiveHour: null,
   weekly: null,
+  resets: null,
+  advice: null,
   status: 'UNKNOWN',
   until: null,
   reason: null,
@@ -33,7 +35,7 @@ const UNKNOWN_USAGE: CodexUsage = {
 const runs = atom({ plugin: 'codex-workers', key: 'runs' } as const,
   { now: 0, workers: [] }, { shape: 'runs-1' })
 const usage = atom({ plugin: 'codex-workers', key: 'usage' } as const,
-  UNKNOWN_USAGE, { shape: 'usage-1' })
+  UNKNOWN_USAGE, { shape: 'usage-2' })
 const claudeUsage = atom({ plugin: 'codex-workers', key: 'claudeUsage' } as const,
   { fiveHour: null, weekly: null, contextPercent: null, costUsd: null }, { shape: 'claude-usage-1' })
 const seenIds = atom({ plugin: 'codex-workers', key: 'seenIds' } as const,
@@ -207,10 +209,15 @@ function usageWindow(match: RegExpMatchArray | null): UsageWindow | null {
 export function parseUsage(text: string): CodexUsage {
   const status = text.match(/^\s*STATUS=(OK|THROTTLE|BLOCKED|UNKNOWN)\b([^\r\n]*)/m)
   const details = status?.[2] ?? ''
-  const until = details.match(/\bUNTIL=(\d+)\b/)
+  const metadata = details.split(/\bREASON=/, 1)[0] ?? ''
+  const until = metadata.match(/\bUNTIL=(\d+)\b/)
+  const banked = text.match(/^[ \t]*Banked resets:[ \t]*(\d+)\b(?:[ \t]+\(expire ([^)\r\n]+)\))?/m)
+  const count = Number(banked?.[1] ?? metadata.match(/\bRESETS=(\d+)\b/)?.[1] ?? 0)
   return {
     fiveHour: usageWindow(text.match(/^\s*5-hour window:\s*(\d+(?:\.\d+)?)% used,\s*resets ([^\r\n]+)/m)),
     weekly: usageWindow(text.match(/^\s*Weekly window:\s*(\d+(?:\.\d+)?)% used(?: \([^\r\n]*?\))?,\s*resets ([^\r\n]+)/m)),
+    resets: count > 0 ? { count, expires: banked?.[2]?.trim() ?? null } : null,
+    advice: metadata.match(/\bADVICE=(REDEEM_RECOMMENDED|REDEEM_OPTIONAL|REDEEM_BEFORE_EXPIRY)\b/)?.[1] ?? null,
     status: (status?.[1] ?? 'UNKNOWN') as CodexUsage['status'],
     until: until ? Number(until[1]) : null,
     reason: details.match(/\bREASON=(.+)/)?.[1]?.trim() ?? null,
@@ -328,6 +335,12 @@ function percentage(percent: number | null): Segment {
   return { text: percent === null ? '—' : percent + '%', color: percentColor(percent) }
 }
 
+function bankedResets(codex: CodexUsage): Segment[] {
+  return codex.resets && codex.resets.count > 0
+    ? [{ text: '↺' + codex.resets.count, color: codex.advice ? 'yellow' : undefined }]
+    : []
+}
+
 function rowWidth(segments: Segment[]): number {
   return segments.reduce((width, segment) => width + Array.from(segment.text).length, 0)
 }
@@ -366,9 +379,11 @@ export function layoutBand(
   const color = statusColor(codex.status)
   const hasClaudeWindows = claude.fiveHour !== null || claude.weekly !== null
   const claudeHead = [{ text: 'Claude' }, ...(hasClaudeWindows ? claudeWindows : context)]
+  const resets = bankedResets(codex)
   const codexTail = [
     { text: ' │ ' }, { text: 'Codex', color }, { text: ' ' + workerSummary + ' · 5h ' },
     codexFiveHour, { text: ' · wk ' }, codexWeekly,
+    ...(resets.length ? [{ text: ' · ' }, ...resets] : []),
   ]
   const hint = { text: ' │ /codex-workers' }
   const wide = [
@@ -387,7 +402,11 @@ export function layoutBand(
     { text: ' │ ' }, { text: 'X', color }, { text: ' ' + workerSummary + ' ' },
     codexFiveHour, { text: '/' }, codexWeekly,
   ]
-  return clipRow(compact, columns)
+  if (!resets.length) return clipRow(compact, columns)
+  const compactResets = [{ text: ' ' }, ...resets]
+  const remaining = columns - rowWidth(compactResets)
+  if (remaining > 0) return [...clipRow(compact, remaining), ...compactResets]
+  return clipRow(resets, columns)
 }
 
 function codexReset(label: string, resets: string): string {
@@ -410,16 +429,16 @@ function windowSegments(label: string, percent: number | null, reset: string, co
 type FooterWindow = { label: string; percent: number | null; reset: string }
 
 function footerRows(
-  label: string, windows: FooterWindow[], tail: Segment[], columns: number,
+  label: string, windows: FooterWindow[], tail: Segment[][], columns: number,
 ): Segment[][] {
   const parts = windows.map(window => windowSegments(window.label, window.percent, window.reset, Infinity))
-  parts.push(tail)
+  parts.push(...tail)
   const wide = [{ text: label }, ...parts.flatMap(part => [{ text: '  ' }, ...part])]
   if (rowWidth(wide) <= columns) return [wide]
   return [
     clipRow([{ text: label }], columns),
     ...windows.map(window => windowSegments(window.label, window.percent, window.reset, columns)),
-    clipRow(tail, columns),
+    ...tail.map(part => clipRow(part, columns)),
   ]
 }
 
@@ -650,9 +669,20 @@ export const register: Register = on => {
     const codexWindows = ([['5h', codex.fiveHour], ['wk', codex.weekly]] as const).map(([label, window]) => ({
       label, percent: window?.percent ?? null, reset: codexReset(label, window?.resets ?? ''),
     }))
+    const resets = bankedResets(codex)
+    const codexTail: Segment[][] = [[{ text: codex.status, color: statusColor(codex.status) }]]
+    if (resets.length) {
+      if (codex.resets?.expires) {
+        resets.push({ text: '  next expires ' + codex.resets.expires, color: resets[0]?.color })
+      }
+      codexTail.push(resets)
+    }
+    if (codex.advice) {
+      codexTail.push([{ text: codex.advice.toLowerCase().replace(/_/g, ' '), color: 'yellow' }])
+    }
     const footer = [
-      ...footerRows('Claude', claudeWindows, [{ text: 'ctx ' }, percentage(claude.contextPercent)], columns),
-      ...footerRows('Codex', codexWindows, [{ text: codex.status, color: statusColor(codex.status) }], columns),
+      ...footerRows('Claude', claudeWindows, [[{ text: 'ctx ' }, percentage(claude.contextPercent)]], columns),
+      ...footerRows('Codex', codexWindows, codexTail, columns),
     ]
     return (
       <Box flexDirection="column">
