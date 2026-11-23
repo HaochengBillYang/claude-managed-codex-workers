@@ -36,7 +36,7 @@ OpenAI occasionally grants **banked resets**. On Plus, one redemption restores b
 
 - `low`: single-file or mechanical changes, writing tests for existing code, running test suites, renames, boilerplate, simple GUI steps.
 - `medium`: multi-file features, debugging with unclear cause, nontrivial GUI flows, anything that failed once at `low`.
-- Never higher; if medium fails twice, the task is under-specified — re-scope it yourself.
+- Never higher for code; if medium fails twice, the task is under-specified, so re-scope it yourself. Exception, approved by the owner: long-form writing (book chapters) may use `high`, with `CODEX_MODEL` chosen per docs/WRITING-WORKFLOW.md in the writing repo.
 
 ## 3. Pick sandbox
 
@@ -69,7 +69,7 @@ List files changed, commands run with results, and anything you could not do or 
 ## 5. Run
 
 ```
-~/.claude/skills/codex/scripts/codex-run.sh <low|medium> <sandbox> <workdir> <brief-file>
+~/.claude/skills/codex/scripts/codex-run.sh <low|medium|high> <sandbox> <workdir> <brief-file>
 ```
 Always launch with the Bash tool's `run_in_background: true` (one Bash call per worker, description "Codex worker: <name>") so each shows as a native background shell, and prefix `CODEX_BATCH="<workflow name>"` to group parallel workers. The `codex-workers` mod (`/codex-workers` toggles its pane) draws them live from `~/.claude/codex-runs/*.json` and `<brief>.md.events.jsonl`. Output: `<brief>.result` (Codex's final report), `<brief>.log` (full log). The wrapper prints usage afterward.
 

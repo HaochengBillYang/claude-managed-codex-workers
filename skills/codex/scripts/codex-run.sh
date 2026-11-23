@@ -1,5 +1,5 @@
 #!/bin/bash
-# Usage: codex-run.sh <low|medium> <read-only|workspace-write> <workdir> <brief-file>
+# Usage: codex-run.sh <low|medium|high> <read-only|workspace-write> <workdir> <brief-file> (model: $CODEX_MODEL, default gpt-6.2-sol)
 set -u
 
 APP_CODEX=/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex
@@ -33,11 +33,12 @@ write_record() {
   /usr/bin/jq -n \
     --arg id "$id" --arg name "$name" --arg batch "$BATCH" \
     --arg brief "$brief_path" --arg workdir "$workdir_path" \
-    --arg effort "$EFFORT" --arg sandbox "$SB" --argjson pid "$child_pid" \
+    --arg effort "$EFFORT" --arg model "${CODEX_MODEL:-gpt-6.2-sol}" \
+    --arg sandbox "$SB" --argjson pid "$child_pid" \
     --arg status "$1" --argjson exit_code "$2" \
     --argjson started_at "$started_at" --argjson ended_at "$3" \
     '{
-      $id, $name, $batch, $brief, $workdir, $effort, $sandbox, $pid,
+      $id, $name, $batch, $brief, $workdir, $effort, $model, $sandbox, $pid,
       $status, $exit_code, $started_at, $ended_at,
       events: ($brief + ".events.jsonl"),
       result: ($brief + ".result"),
@@ -73,7 +74,7 @@ on_signal() {
 }
 trap on_signal INT TERM HUP
 
-"$CODEX" exec --json -m gpt-6.2-sol -c "model_reasoning_effort=\"$EFFORT\"" "${SBARGS[@]}" \
+"$CODEX" exec --json -m "${CODEX_MODEL:-gpt-6.2-sol}" -c "model_reasoning_effort=\"$EFFORT\"" "${SBARGS[@]}" \
   --skip-git-repo-check -C "$DIR" -o "$BRIEF.result" - \
   < "$BRIEF" > "$BRIEF.events.jsonl" 2> "$BRIEF.log" &
 child_pid=$!
