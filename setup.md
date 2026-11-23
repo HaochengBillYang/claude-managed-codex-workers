@@ -14,7 +14,7 @@ Last updated: 2026-11-21. Source of truth if a chat is lost or compacted.
 | Run wrapper | `~/.claude/skills/codex/scripts/codex-run.sh <low\|medium> <read-only\|workspace-write> <workdir> <brief.md>` → `<brief>.md.result`, `<brief>.md.log`, `<brief>.md.events.jsonl`, plus a run record in `~/.claude/codex-runs/` |
 | Usage checker | `~/.claude/skills/codex/scripts/codex-usage.sh` (last line: `STATUS=OK\|THROTTLE\|BLOCKED UNTIL=<epoch>\|UNKNOWN`) |
 | Claude writer budget | `~/.claude/skills/codex/scripts/claude-budget.sh <reserve\|settle\|status> [label]`, reading `~/.claude/claude-usage.json` (written by the `codex-workers` plugin) and keeping `~/.claude/claude-writer-ledger.json` |
-| Permission allow rules for both scripts | `~/.claude/settings.json`. Added by the user or by `install.sh`; Claude may not edit its own permissions. |
+| Permission allow rules for the three scripts (usage, run, Claude budget) | `~/.claude/settings.json`. Added by the user or by `install.sh`; Claude may not edit its own permissions. |
 | Worker visualizer plugin | `codex-workers`, installed at user scope from this repo's marketplace. Source: `plugins/codex-workers/`. |
 | Claude memory | `~/.claude/projects/-Users-xseven/memory/` (`codex-delegation.md`, `github-account.md`) |
 | GitHub | https://github.com/HaochengBillYang |
