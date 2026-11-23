@@ -321,7 +321,7 @@ export function workerRow(worker: Worker, now: number, columns: number, nameWidt
 }
 
 type UsageColor = 'yellow' | 'red'
-type Segment = { text: string; color?: UsageColor }
+type Segment = { text: string; color?: UsageColor; dimColor?: boolean }
 
 export function percentColor(percent: number | null): UsageColor | undefined {
   return percent === null ? undefined : percent >= 90 ? 'red' : percent >= 70 ? 'yellow' : undefined
@@ -414,31 +414,39 @@ function codexReset(label: string, resets: string): string {
   return parts.length === 4 ? (label === 'wk' ? parts[0] + ' ' : '') + parts[3] : resets
 }
 
-function windowSegments(label: string, percent: number | null, reset: string, columns: number): Segment[] {
-  if (percent === null) return clipRow([{ text: label + ' —' }], columns)
-  const value = percentage(percent)
-  const resetLabel = reset ? '  resets ' + reset : ''
-  const barWidth = Math.max(0, Math.min(10, columns - label.length - value.text.length - resetLabel.length - 4))
-  const used = Math.ceil(Math.max(0, Math.min(100, percent)) * barWidth / 100)
-  const bar = barWidth ? '  ' + '█'.repeat(used) + '░'.repeat(barWidth - used) : ''
-  const segments = [{ text: label + bar + '  ' }, value]
-  if (resetLabel) segments.push({ text: resetLabel })
-  return clipRow(segments, columns)
-}
-
 type FooterWindow = { label: string; percent: number | null; reset: string }
 
+const FOOTER_LABEL_WIDTH = 8
+const FOOTER_INDENT = { text: ' '.repeat(FOOTER_LABEL_WIDTH) }
+const FOOTER_GAP = { text: '   ' }
+
+function windowSegments({ label, percent, reset }: FooterWindow): Segment[] {
+  const barWidth = 10
+  const bounded = percent === null ? null : Math.max(0, Math.min(100, percent))
+  const value = bounded === null ? '—' : Math.round(bounded) + '%'
+  const filled = Math.round((bounded ?? 0) * barWidth / 100)
+  const bar = percent === null ? ' '.repeat(barWidth) : '█'.repeat(filled) + '░'.repeat(barWidth - filled)
+  const resetText = percent !== null && reset ? clip('resets ' + reset, 16) : ''
+  return [
+    { text: label + ' ' + bar + '  ' },
+    { text: value.padStart(4), color: percentColor(percent), dimColor: percent === null },
+    { text: '  ' + resetText.padEnd(16) },
+  ]
+}
+
 function footerRows(
-  label: string, windows: FooterWindow[], tail: Segment[][], columns: number,
+  label: string, windows: FooterWindow[], tail: Segment[], columns: number,
 ): Segment[][] {
-  const parts = windows.map(window => windowSegments(window.label, window.percent, window.reset, Infinity))
-  parts.push(...tail)
-  const wide = [{ text: label }, ...parts.flatMap(part => [{ text: '  ' }, ...part])]
+  const cells = windows.map(windowSegments)
+  const wide = [
+    { text: label.padEnd(FOOTER_LABEL_WIDTH) },
+    ...cells.flatMap(cell => [...cell, FOOTER_GAP]),
+    ...tail,
+  ]
   if (rowWidth(wide) <= columns) return [wide]
   return [
     clipRow([{ text: label }], columns),
-    ...windows.map(window => windowSegments(window.label, window.percent, window.reset, columns)),
-    ...tail.map(part => clipRow(part, columns)),
+    ...[...cells, tail].map(part => clipRow([FOOTER_INDENT, ...part], columns)),
   ]
 }
 
@@ -661,29 +669,32 @@ export const register: Register = on => {
     const longestName = Math.max(1, ...groups.flatMap(group =>
       group.workers.map(worker => Array.from(worker.record.name).length)))
     const nameWidth = Math.max(1, Math.min(14, longestName, columns - 25))
-    const claudeWindows = claude.fiveHour || claude.weekly
-      ? ([['5h', claude.fiveHour], ['wk', claude.weekly]] as const).map(([label, window]) => ({
-        label, percent: window?.percent ?? null, reset: formatClaudeReset(window?.resetsAt ?? null, nowMs),
-      }))
-      : []
+    const claudeWindows = ([['5h', claude.fiveHour], ['wk', claude.weekly]] as const).map(([label, window]) => ({
+      label, percent: window?.percent ?? null, reset: formatClaudeReset(window?.resetsAt ?? null, nowMs),
+    }))
     const codexWindows = ([['5h', codex.fiveHour], ['wk', codex.weekly]] as const).map(([label, window]) => ({
       label, percent: window?.percent ?? null, reset: codexReset(label, window?.resets ?? ''),
     }))
-    const resets = bankedResets(codex)
-    const codexTail: Segment[][] = [[{ text: codex.status, color: statusColor(codex.status) }]]
-    if (resets.length) {
-      if (codex.resets?.expires) {
-        resets.push({ text: '  next expires ' + codex.resets.expires, color: resets[0]?.color })
-      }
-      codexTail.push(resets)
-    }
-    if (codex.advice) {
-      codexTail.push([{ text: codex.advice.toLowerCase().replace(/_/g, ' '), color: 'yellow' }])
-    }
     const footer = [
-      ...footerRows('Claude', claudeWindows, [[{ text: 'ctx ' }, percentage(claude.contextPercent)]], columns),
-      ...footerRows('Codex', codexWindows, codexTail, columns),
+      ...footerRows('Claude', claudeWindows, [{ text: 'ctx ' }, percentage(claude.contextPercent)], columns),
+      ...footerRows('Codex', codexWindows, [{ text: codex.status, color: statusColor(codex.status) }], columns),
     ]
+    const resets = codex.resets
+    if (resets && resets.count > 0) {
+      const count = '↺' + resets.count + (resets.count === 1 ? ' banked reset' : ' banked resets')
+      const expiry = resets.expires ? ' · next expires ' + resets.expires : ''
+      const adviceText = codex.advice ? codex.advice.toLowerCase().replace(/_/g, ' ') : ''
+      const color = adviceText ? 'yellow' as const : undefined
+      const oneLine = count + expiry + (adviceText ? ' · ' + adviceText : '')
+      const indent = Array.from(FOOTER_INDENT.text).length
+      if (indent + Array.from(oneLine).length <= columns || !adviceText) {
+        footer.push(clipRow([FOOTER_INDENT, { text: oneLine, color }], columns))
+      } else {
+        // Narrow pane: keep the count line whole and give the advice its own line.
+        footer.push(clipRow([FOOTER_INDENT, { text: count + expiry, color }], columns))
+        footer.push(clipRow([FOOTER_INDENT, { text: adviceText, color }], columns))
+      }
+    }
     return (
       <Box flexDirection="column">
         {groups.length === 0 && <Text dimColor>No Codex workers yet.</Text>}
@@ -706,7 +717,7 @@ export const register: Register = on => {
         <Text dimColor>{'─'.repeat(columns)}</Text>
         {footer.map(row => (
           <Box flexDirection="row">
-            {row.map(({ text, color }) => <Text color={color} wrap="truncate-end">{text}</Text>)}
+            {row.map(({ text, color, dimColor }) => <Text color={color} dimColor={dimColor} wrap="truncate-end">{text}</Text>)}
           </Box>
         ))}
       </Box>
@@ -720,7 +731,7 @@ export const register: Register = on => {
     const row = layoutBand(workers, now, claude, codex, e.props.bodyColumns)
     return (
       <Box flexDirection="row">
-        {row.map(({ text, color }) => <Text color={color} wrap="truncate-end">{text}</Text>)}
+        {row.map(({ text, color, dimColor }) => <Text color={color} dimColor={dimColor} wrap="truncate-end">{text}</Text>)}
       </Box>
     )
   })

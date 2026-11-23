@@ -346,7 +346,7 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
     requestId: 'codex-workers',
     surface: 'terminal',
     props: {
-      title: 'Codex workers', bodyColumns: 144, isFocused: false, placement: 'dock',
+      title: 'Codex workers', bodyColumns: 120, isFocused: false, placement: 'dock',
       scroll: { offset: 0, bodyRows: 20 }, view: {},
     },
   } as const
@@ -437,7 +437,7 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
       ...(record.status === 'running' ? [
         '  Banked resets: 2 (expire Tue Dec 01) - restore 5h + weekly',
         'STATUS=THROTTLE RESETS=2 ADVICE=REDEEM_BEFORE_EXPIRY REASON=weekly pace',
-      ] : ['STATUS=OK']),
+      ] : ['STATUS=OK RESETS=1']),
     ].join('\n')
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -475,7 +475,10 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
 
   const measure = {
     context: { window: 200000, percent: 91 },
-    rateLimits: [{ kind: 'five_hour', percentUsed: 70, resetsAt: new Date((now + 600) * 1000).toISOString() }],
+    rateLimits: [
+      { kind: 'five_hour', percentUsed: 70, resetsAt: new Date((now + 600) * 1000).toISOString() },
+      { kind: 'seven_day', percentUsed: 90, resetsAt: new Date((now + 2 * 86400) * 1000).toISOString() },
+    ],
     cost: { usd: 1 },
     changed: ['context', 'rateLimits', 'cost'],
   } satisfies Parameters<typeof $.session.measure>[0]
@@ -483,7 +486,7 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   expect(measured).toBe(1)
   expect(claudeUsageCalls).toBe(1)
   await bandUi.redraw()
-  expect(await bandText()).toBe('Claude 5h 70% · wk — · ctx 91% │ Codex idle · 5h — · wk — │ /codex-workers')
+  expect(await bandText()).toBe('Claude 5h 70% · wk 90% · ctx 91% │ Codex idle · 5h — · wk — │ /codex-workers')
   expect((await bandUi.find({ type: 'Text', text: /^70%$/ }))?.props.color).toBe('yellow')
   expect((await bandUi.find({ type: 'Text', text: /^91%$/ }))?.props.color).toBe('red')
 
@@ -500,17 +503,36 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   }
   expect(await waitForRow(/THROTTLE/)).toBe('THROTTLE')
   expect(await waitForRow(/\$ ls/)).toMatch(/impl.*low · ws.*13:20/)
-  expect((await paneUi.find({ type: 'Box', text: /^Claude  / }))?.text)
-    .toMatch(/^Claude  5h  █{7}░{3}  70%  resets \d{2}:\d{2}  wk —  ctx 91%$/)
-  expect((await paneUi.find({ type: 'Box', text: /^Codex  / }))?.text)
-    .toBe('Codex  5h  █░░░░░░░░░  9%  resets 23:10  wk  ██░░░░░░░░  16%  resets Tue 14:49  THROTTLE  ↺2  next expires Tue Dec 01  redeem before expiry')
-  expect((await paneUi.find({ type: 'Text', text: /^↺2$/ }))?.props.color).toBe('yellow')
-  expect((await paneUi.find({ type: 'Text', text: /^70%$/ }))?.props.color).toBe('yellow')
-  await paneUi.redraw({ ...pane.props, bodyColumns: 30 })
-  expect((await paneUi.find({ type: 'Box', text: /^5h.*70%/ }))?.text).toMatch(/resets \d{2}:\d{2}$/)
-  expect((await paneUi.find({ type: 'Box', text: /^wk —$/ }))?.text).toBe('wk —')
-  expect((await paneUi.find({ type: 'Box', text: /^↺2/ }))?.text).toBe('↺2  next expires Tue Dec 01')
-  expect((await paneUi.find({ type: 'Box', text: /^redeem before expiry$/ }))?.text).toBe('redeem before expiry')
+  const claudeRow = (await paneUi.find({ type: 'Box', text: /^Claude {2}5h/ }))?.text ?? ''
+  const codexRow = (await paneUi.find({ type: 'Box', text: /^Codex {3}5h/ }))?.text ?? ''
+  const resetsRow = '        ↺2 banked resets · next expires Tue Dec 01 · redeem before expiry'
+  expect(claudeRow).toMatch(/^Claude  5h █{7}░{3}   70%  resets \d{2}:\d{2} {7}wk █{9}░   90%  resets [A-Za-z]{3} \d{2}:\d{2}   ctx 91%$/)
+  expect(codexRow).toBe('Codex   5h █░░░░░░░░░    9%  resets 23:10       wk ██░░░░░░░░   16%  resets Tue 14:49   THROTTLE')
+  for (const column of ['5h', 'wk']) {
+    expect(claudeRow.indexOf(column)).toBe(codexRow.indexOf(column))
+  }
+  expect(claudeRow.indexOf('%')).toBe(codexRow.indexOf('%'))
+  expect(claudeRow.indexOf('%', claudeRow.indexOf('wk'))).toBe(codexRow.lastIndexOf('%'))
+  expect((await paneUi.find({ type: 'Box', text: /^ {8}↺/ }))?.text).toBe(resetsRow)
+  expect((await paneUi.find({ type: 'Text', text: /^↺2 banked resets/ }))?.props.color).toBe('yellow')
+  expect((await paneUi.find({ type: 'Text', text: /^ 70%$/ }))?.props.color).toBe('yellow')
+  expect((await paneUi.find({ type: 'Text', text: /^THROTTLE$/ }))?.props.color).toBe('yellow')
+  expect((await paneUi.find({ type: 'Text', text: /^ 90%$/ }))?.props.color).toBe('red')
+
+  await paneUi.redraw({ ...pane.props, bodyColumns: 60 })
+  const stackedRows = await paneUi.findAll({ type: 'Box', text: /^(?:Claude|Codex)$|^ {8}(?:5h|wk|ctx|THROTTLE|↺|redeem)/ })
+  expect(stackedRows.map(row => row.text)).toEqual([
+    'Claude',
+    '        ' + claudeRow.slice(8, 45),
+    '        ' + claudeRow.slice(48, 85),
+    '        ctx 91%',
+    'Codex',
+    '        ' + codexRow.slice(8, 45),
+    '        ' + codexRow.slice(48, 85),
+    '        THROTTLE',
+    '        ↺2 banked resets · next expires Tue Dec 01',
+    '        redeem before expiry',
+  ])
   await paneUi.redraw(pane.props)
   await firstOpen
   expect(opens).toBe(1)
@@ -526,6 +548,8 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   tick()
   expect(await waitForRow(/Added fixture tests/)).toMatch(/✓.*13:21/)
   expect(await waitForRow(/^OK$/)).toBe('OK')
+  expect((await paneUi.find({ type: 'Box', text: /^ {8}↺/ }))?.text).toBe('        ↺1 banked reset')
+  expect((await paneUi.find({ type: 'Text', text: /^↺1 banked reset$/ }))?.props.color).toBe(undefined)
   expect(pidChecks).toBe(1)
   expect(tailReads.length).toBe(1)
   expect(usageCalls).toBe(2)
@@ -537,11 +561,15 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   claudeSnapshot = { ...CLAUDE_USAGE, context: { window: 200000, percent: 42 }, rateLimits: [] }
   tick()
   expect(await waitForRow(/^42%$/)).toBe('42%')
+  const placeholder = (label: string) => label + ' '.repeat(16) + '—' + ' '.repeat(18)
+  expect((await paneUi.find({ type: 'Box', text: /^Claude {2}5h/ }))?.text)
+    .toBe('Claude  ' + placeholder('5h') + '   ' + placeholder('wk') + '   ctx 42%')
   expect(claudeUsageCalls).toBe(2)
   await bandUi.redraw()
-  expect(await bandText()).toBe('Claude ctx 42% │ Codex 1 done · 5h 9% · wk 16% │ /codex-workers')
-  // The measure event (5h only) and the empty refresh are partial readings: no further writes.
-  expect(usageFileWrites.length).toBe(1)
+  expect(await bandText()).toBe('Claude ctx 42% │ Codex 1 done · 5h 9% · wk 16% · ↺1 │ /codex-workers')
+  expect((await paneUi.find({ type: 'Text', text: /^   —$/ }))?.props.dimColor).toBe(true)
+  // Only the initial and measured snapshots have both windows.
+  expect(usageFileWrites.length).toBe(2)
 
   const command = {
     command: 'codex-workers', args: '', origin: { kind: 'composer' },

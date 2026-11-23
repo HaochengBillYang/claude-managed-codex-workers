@@ -126,3 +126,7 @@ The status line can include `RESETS=N` and `ADVICE=` before `REASON=`. The
 banked line takes precedence for the count. The band keeps the count as it
 narrows, and the pane shows the count, expiry when available, and redemption
 advice. Advice highlights the reset indicator in yellow.
+
+## v0.2.4 (footer grid)
+
+The pane footer uses fixed columns: an 8-character label, then window cells of fixed width (bar, percent padded to 4, reset text padded to 16). Missing values render as same-width placeholders, so the Claude and Codex rows align. Banked resets always get their own indented line, and on a narrow pane the advice moves to a further line instead of being clipped. Claude has no banked-reset credits: its usage data exposes only window reset times.
