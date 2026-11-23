@@ -32,6 +32,15 @@ OpenAI occasionally grants **banked resets**. On Plus, one redemption restores b
 - **Never redeem yourself.** It spends a scarce account resource. Only the user redeems.
 - After the user says they redeemed, decrement `available` in the file, then run Codex once to refresh the snapshot. When new resets are announced, ask the user for the count and expiry, then update the file.
 
+### Claude writer budget
+The owner (on Claude Max) approved Claude writer subagents, capped at **20 points of BOTH the Claude 5h and weekly limits**. The `codex-workers` plugin (0.2.2+) writes the band's Claude usage to `~/.claude/claude-usage.json`. `claude-budget.sh` keeps a ledger of what writers spent, in `~/.claude/claude-writer-ledger.json`.
+- **Before each writer:** run `~/.claude/skills/codex/scripts/claude-budget.sh reserve <label>`. The last line is `STATUS=OK|THROTTLE|BLOCKED SPENT_5H= SPENT_WK= REMAIN_5H= REMAIN_WK= OPEN=`.
+  - OK: launch.
+  - THROTTLE (≥ 15 points spent in either window): one writer at a time.
+  - BLOCKED (≥ 20 points, or a snapshot older than 15 min, or no snapshot): don't launch. Exit code is 1, and nothing is reserved.
+- **After it finishes:** run `claude-budget.sh settle <label>`. This records the delta since the reservation, per window, floored at 0. If a window reset meanwhile, the post-reset value counts. `claude-budget.sh status` shows the spend, the remaining budget and any open reservations.
+- **Deltas are conservative:** they include everything the account did meanwhile, including this PM session and parallel writers. Settle every reservation, even after a failure. An open reservation is not counted until settled.
+
 ## 2. Pick effort
 
 - `low`: single-file or mechanical changes, writing tests for existing code, running test suites, renames, boilerplate, simple GUI steps.

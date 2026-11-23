@@ -13,6 +13,7 @@ Last updated: 2026-11-21. Source of truth if a chat is lost or compacted.
 | Delegation skill (rules, brief template, review checklist) | `~/.claude/skills/codex/SKILL.md`. Source: `skills/codex/` in this repo; `install.sh` copies it over. |
 | Run wrapper | `~/.claude/skills/codex/scripts/codex-run.sh <low\|medium> <read-only\|workspace-write> <workdir> <brief.md>` → `<brief>.md.result`, `<brief>.md.log`, `<brief>.md.events.jsonl`, plus a run record in `~/.claude/codex-runs/` |
 | Usage checker | `~/.claude/skills/codex/scripts/codex-usage.sh` (last line: `STATUS=OK\|THROTTLE\|BLOCKED UNTIL=<epoch>\|UNKNOWN`) |
+| Claude writer budget | `~/.claude/skills/codex/scripts/claude-budget.sh <reserve\|settle\|status> [label]`, reading `~/.claude/claude-usage.json` (written by the `codex-workers` plugin) and keeping `~/.claude/claude-writer-ledger.json` |
 | Permission allow rules for both scripts | `~/.claude/settings.json`. Added by the user or by `install.sh`; Claude may not edit its own permissions. |
 | Worker visualizer plugin | `codex-workers`, installed at user scope from this repo's marketplace. Source: `plugins/codex-workers/`. |
 | Claude memory | `~/.claude/projects/-Users-xseven/memory/` (`codex-delegation.md`, `github-account.md`) |
@@ -24,6 +25,12 @@ Codex writes rate limits into every session log (`~/.codex/sessions/**/*.jsonl`,
 - **THROTTLE**: 5h ≥ 70% or weekly use > 15 pts ahead of elapsed-week % → low effort only, batch tasks.
 - **OK** otherwise.
 - **Banked resets**: tracked by hand in `~/.claude/codex-resets.json` (`{"available": N, "expires": "YYYY-MM-DD"}`), because the Codex CLI does not expose them. On Plus, each one restores both windows. While any remain, the weekly-pace rule does not throttle. The script adds `RESETS=N` and `ADVICE=REDEEM_RECOMMENDED|REDEEM_OPTIONAL|REDEEM_BEFORE_EXPIRY`. Only the user redeems (Codex app → Settings → Usage → Redeem reset). Details are in `skills/codex/SKILL.md`.
+- **Claude writer budget** (Claude Max, owner-approved 2026-11-23): Claude writer subagents may use at most 20 points of each Claude window (5h and weekly).
+  - **Usage file:** from version 0.2.2, the `codex-workers` plugin writes `~/.claude/claude-usage.json` as `{"five_hour_pct","five_hour_resets_at","weekly_pct","weekly_resets_at","updated_at"}` (epoch seconds), from the same data as its band. It writes atomically (temp file, then `mv`), only when both windows are known, and on change or at least every 5 minutes.
+  - **Ledger:** `claude-budget.sh reserve <label>` records a baseline, and `settle <label>` records the delta per window. Spend counts in the window whose reset time (±5 min) matches the current one.
+  - **Status:** BLOCKED at ≥ 20 points in either window, or when the snapshot is more than 15 minutes old; THROTTLE at ≥ 15 points.
+  - **Overrides:** `CLAUDE_WRITER_CAP`, `CLAUDE_WRITER_THROTTLE`, `CLAUDE_USAGE_STALE`, `CLAUDE_USAGE_FILE` and `CLAUDE_WRITER_LEDGER`.
+  - The deltas include all other account activity, so the budget is conservative.
 
 ## Sandbox
 - Use `workspace-write` (writes only inside the workdir) for coding and GUI work, and `read-only` for investigation.
@@ -42,7 +49,7 @@ Codex writes rate limits into every session log (`~/.codex/sessions/**/*.jsonl`,
 ## Seeing workers live
 - `codex-run.sh` writes a run record per worker to `~/.claude/codex-runs/<id>.json` (status, pid, effort, batch, timings) and streams Codex JSON events to `<brief>.md.events.jsonl`. Set `CODEX_BATCH="<name>"` to group parallel workers into one workflow.
 - Launch each worker with the Bash tool's `run_in_background: true` so it shows as a native background shell.
-- The `codex-workers` plugin (`plugins/codex-workers/`, design in `docs/codex-workers-design.md`) draws a workflow pane from those records. It also draws an always-on status row above the prompt with Claude usage (5h, weekly, context; from `$.session.usage()` and `session.measure`) and Codex usage (from `codex-usage.sh`). Numbers turn yellow at 70% and red at 90%. Versions: 0.1 added the pane and an active-only row; 0.2 made the row always on and added Claude usage. Toggle it with `/codex-workers`.
+- The `codex-workers` plugin (`plugins/codex-workers/`, design in `docs/codex-workers-design.md`) draws a workflow pane from those records. It also draws an always-on status row above the prompt with Claude usage (5h, weekly, context; from `$.session.usage()` and `session.measure`) and Codex usage (from `codex-usage.sh`). Numbers turn yellow at 70% and red at 90%. Versions: 0.1 added the pane and an active-only row; 0.2 made the row always on and added Claude usage; 0.2.1 shows high-effort workers and their model ("high · astra"); 0.2.2 writes `~/.claude/claude-usage.json` for `claude-budget.sh`. Toggle it with `/codex-workers`.
 
 ## Workflow per task
 1. Claude: `codex-usage.sh` → check status.

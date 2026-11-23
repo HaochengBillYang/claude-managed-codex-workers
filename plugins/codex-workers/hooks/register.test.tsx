@@ -4,6 +4,9 @@ import {
   activityFromEvents,
   applyLiveness,
   bandCounts,
+  claudeUsageFile,
+  usageFileState,
+  planUsageFileWrite,
   extractClaudeUsage,
   formatClaudeReset,
   formatElapsed,
@@ -255,6 +258,51 @@ test('high-effort records show their model compactly; records without a model st
   expect(parseRun(JSON.stringify({ ...RUN, model: 42 }), RUN.id)).toEqual(RUN)
 })
 
+test('the Claude usage file plan needs both windows, skips unchanged values and refreshes on a heartbeat', () => {
+  const reset5h = '2026-11-23T10:00:00.000Z'
+  const resetWk = '2026-11-28T00:00:00.000Z'
+  const usage = (fivePct: number) => extractClaudeUsage({
+    context: { window: 200000, percent: 10 },
+    rateLimits: [
+      { kind: 'five_hour', percentUsed: fivePct, resetsAt: reset5h },
+      { kind: 'seven_day', percentUsed: 30, resetsAt: resetWk },
+    ],
+  })
+  const state = usageFileState('/home/u/.claude/claude-usage.json')
+  // What writeClaudeUsageFile records after a successful mv.
+  const written = (plan: ReturnType<typeof planUsageFileWrite>) => {
+    state.lastKey = plan!.key
+    state.lastWrite = plan!.now
+    return JSON.parse(plan!.text)
+  }
+
+  const first = planUsageFileWrite(state, usage(12), 1000.7)
+  expect(first?.tmp).toBe('/home/u/.claude/claude-usage.json.tmp')
+  expect(first?.path).toBe('/home/u/.claude/claude-usage.json')
+  expect(first?.text.endsWith('\n')).toBe(true)
+  expect(written(first)).toEqual({
+    five_hour_pct: 12, five_hour_resets_at: Date.parse(reset5h) / 1000,
+    weekly_pct: 30, weekly_resets_at: Date.parse(resetWk) / 1000, updated_at: 1000,
+  })
+
+  expect(planUsageFileWrite(state, usage(12), 1100)).toBe(undefined)   // unchanged, inside the heartbeat
+  expect(written(planUsageFileWrite(state, usage(13), 1100)).five_hour_pct).toBe(13)   // changed
+  expect(planUsageFileWrite(state, usage(13), 1399)).toBe(undefined)
+  expect(written(planUsageFileWrite(state, usage(13), 1400)).updated_at).toBe(1400)   // heartbeat due
+
+  // Without a recorded success (a failed mv), the same values are planned again.
+  expect(planUsageFileWrite(state, usage(14), 1401)).not.toBe(undefined)
+  expect(planUsageFileWrite(state, usage(14), 1402)).not.toBe(undefined)
+
+  // A partial reading (one window) is never written; unparseable resets become null.
+  const partial = extractClaudeUsage({ context: { window: 1, percent: 1 }, rateLimits: [{ kind: 'five_hour', percentUsed: 99 }] })
+  expect(planUsageFileWrite(state, partial, 2000)).toBe(undefined)
+  expect(claudeUsageFile(extractClaudeUsage({
+    context: { window: 1, percent: 1 },
+    rateLimits: [{ kind: 'five_hour', percentUsed: 1, resetsAt: 'soon' }, { kind: 'seven_day', percentUsed: 2 }],
+  }))).toEqual({ five_hour_pct: 1, five_hour_resets_at: null, weekly_pct: 2, weekly_resets_at: null })
+})
+
 test('the live poll drives the terminal pane, band, auto-open and command toggle', async ($, on) => {
   const pane = {
     plugin: 'codex-workers',
@@ -285,6 +333,8 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   let claudeSnapshot = CLAUDE_USAGE
   let pidChecks = 0
   const tailReads: { offset?: number; length?: number }[] = []
+  const usageFileWrites: { path: string; text: string }[] = []
+  const moves: string[][] = []
   let tick = () => {}
   let timerRegistered = () => {}
   let paneOpened = () => {}
@@ -325,9 +375,17 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
     expect(e.path.endsWith('/' + RUN.id + '.json')).toBe(true)
     return { value: JSON.stringify(record) }
   })
+  on('fs.write', (_, e) => {
+    usageFileWrites.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
   on('process.run', (_, e) => {
     if (e.argv[0] === '/usr/bin/printenv') {
       return { value: { exitCode: 0, stdout: '/Users/test\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    if (e.argv[0] === '/bin/mv') {
+      moves.push([...e.argv])
+      return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     const isKill = e.argv[0] === '/bin/kill'
     if (isKill) {
@@ -361,6 +419,12 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   expect(claudeUsageCalls).toBe(1)
+  // The start-up reading has both windows, so it lands on disk via a temp file and mv.
+  expect(usageFileWrites).toEqual([{
+    path: '/Users/test/.claude/claude-usage.json.tmp',
+    text: JSON.stringify({ five_hour_pct: 23, five_hour_resets_at: null, weekly_pct: 41, weekly_resets_at: null, updated_at: 5000 }) + '\n',
+  }])
+  expect(moves).toEqual([['/bin/mv', '-f', '/Users/test/.claude/claude-usage.json.tmp', '/Users/test/.claude/claude-usage.json']])
   const bandUi = await $.ui.mount(band)
   async function bandText() {
     return (await bandUi.findAll({ type: 'Text' })).map(item => item.text).join('')
@@ -434,6 +498,8 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   expect(claudeUsageCalls).toBe(2)
   await bandUi.redraw()
   expect(await bandText()).toBe('Claude ctx 42% │ Codex 1 done · 5h 9% · wk 16% │ /codex-workers')
+  // The measure event (5h only) and the empty refresh are partial readings: no further writes.
+  expect(usageFileWrites.length).toBe(1)
 
   const command = {
     command: 'codex-workers', args: '', origin: { kind: 'composer' },

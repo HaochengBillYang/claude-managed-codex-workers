@@ -423,12 +423,92 @@ function footerRows(
   ]
 }
 
+/** On-disk Claude usage for budgeting scripts (claude-budget.sh): percentages and reset epochs. */
+export type ClaudeUsageFile = {
+  five_hour_pct: number
+  five_hour_resets_at: number | null
+  weekly_pct: number
+  weekly_resets_at: number | null
+}
+
+function epochSeconds(iso: string | null): number | null {
+  if (!iso) return null
+  const ms = Date.parse(iso)
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null
+}
+
+/** Both windows, or undefined: a partial reading (e.g. a measure event with one limit) is never written. */
+export function claudeUsageFile(snapshot: ClaudeUsage): ClaudeUsageFile | undefined {
+  const { fiveHour, weekly } = snapshot
+  if (!fiveHour || !weekly) return undefined
+  return {
+    five_hour_pct: fiveHour.percent,
+    five_hour_resets_at: epochSeconds(fiveHour.resetsAt),
+    weekly_pct: weekly.percent,
+    weekly_resets_at: epochSeconds(weekly.resetsAt),
+  }
+}
+
+/** Rewrite unchanged values at least this often, so `updated_at` shows the reading is current. */
+const USAGE_FILE_HEARTBEAT = 5 * 60
+
+/** Where the usage file goes and what was last written there. */
+export type UsageFileState = { path: string; lastKey: string; lastWrite: number }
+
+export function usageFileState(path: string): UsageFileState {
+  return { path, lastKey: '', lastWrite: -Infinity }
+}
+
+/** A write to perform: `text` goes to `tmp`, which is then moved onto `path`. */
+export type UsageFileWrite = { tmp: string; path: string; text: string; key: string; now: number }
+
+/**
+ * Decides whether a reading should be written: both windows present, and either changed or
+ * past the heartbeat. `nowSeconds` is epoch seconds.
+ */
+export function planUsageFileWrite(
+  state: UsageFileState, snapshot: ClaudeUsage, nowSeconds: number,
+): UsageFileWrite | undefined {
+  const values = claudeUsageFile(snapshot)
+  if (!values) return undefined
+  const now = Math.floor(nowSeconds)
+  const key = JSON.stringify(values)
+  if (key === state.lastKey && now - state.lastWrite < USAGE_FILE_HEARTBEAT) return undefined
+  return { tmp: state.path + '.tmp', path: state.path, text: JSON.stringify({ ...values, updated_at: now }) + '\n', key, now }
+}
+
+/**
+ * Keeps `state.path` (~/.claude/claude-usage.json) in step with the band's Claude usage.
+ * Writes atomically (temp file, then mv), and never throws. A failed write is not remembered,
+ * so the next reading retries it.
+ */
+async function writeClaudeUsageFile(
+  $: EngineInterface, state: UsageFileState | undefined, snapshot: ClaudeUsage,
+): Promise<void> {
+  if (!state) return
+  try {
+    const plan = planUsageFileWrite(state, snapshot, (await $.clock.now()) / 1000)
+    if (!plan) return
+    await $.fs.write(plan.tmp, plan.text)
+    const moved = await $.process.run(['/bin/mv', '-f', plan.tmp, plan.path], { timeoutMs: 2000 })
+    if (moved.exitCode !== 0) return
+    state.lastKey = plan.key
+    state.lastWrite = plan.now
+  } catch {
+    // The band keeps working; the next reading retries.
+  }
+}
+
+let usageFile: UsageFileState | undefined
+
 async function refreshClaudeUsage($: EngineInterface, getMeasurement: () => number) {
   const before = getMeasurement()
   try {
     const snapshot = extractClaudeUsage(await $.session.usage())
     // A measurement may arrive while the snapshot is in flight.
+    if (before !== getMeasurement()) return
     await update($, claudeUsage, current => before === getMeasurement() ? snapshot : current)
+    await writeClaudeUsageFile($, usageFile, snapshot)
   } catch {
     // Keep the last snapshot until a measure event or the next refresh.
   }
@@ -442,6 +522,7 @@ export const register: Register = on => {
     const observed = ++measurement
     const snapshot = extractClaudeUsage(e)
     await update($, claudeUsage, current => observed === measurement ? snapshot : current).catch(() => {})
+    if (observed === measurement) await writeClaudeUsageFile($, usageFile, snapshot)
     return next(e)
   })
 
@@ -451,6 +532,7 @@ export const register: Register = on => {
     if (home) {
       RUNS_DIR = home + '/.claude/codex-runs'
       USAGE_SCRIPT = home + '/.claude/skills/codex/scripts/codex-usage.sh'
+      usageFile = usageFileState(home + '/.claude/claude-usage.json')
     }
     await $.command.register({ name: 'codex-workers', description: 'Toggle the Codex workers pane' })
     let lastClaudeUsage = (await $.clock.now()) / 1000
