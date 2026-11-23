@@ -4,7 +4,9 @@ export type RunRecord = {
   id: string
   name: string
   batch: string
-  effort: 'low' | 'medium'
+  effort: 'low' | 'medium' | 'high'
+  /** Codex model id (e.g. gpt-6.2-sol); absent in records written before codex-run.sh recorded it. */
+  model?: string
   sandbox: 'read-only' | 'workspace-write'
   pid: number
   status: RunStatus

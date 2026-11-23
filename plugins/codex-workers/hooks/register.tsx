@@ -57,10 +57,10 @@ function json(text: string): Record<string, unknown> | undefined {
 export function parseRun(text: string, id: string): RunRecord | undefined {
   const run = json(text)
   if (!run || run.id !== id) return undefined
-  const { name, batch, effort, sandbox, pid, status, started_at, ended_at,
+  const { name, batch, effort, model, sandbox, pid, status, started_at, ended_at,
     exit_code, events, result } = run
   if (typeof name !== 'string' || typeof batch !== 'string'
-    || (effort !== 'low' && effort !== 'medium')
+    || (effort !== 'low' && effort !== 'medium' && effort !== 'high')
     || (sandbox !== 'read-only' && sandbox !== 'workspace-write')
     || typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0
     || (status !== 'running' && status !== 'done' && status !== 'failed' && status !== 'killed')
@@ -69,7 +69,17 @@ export function parseRun(text: string, id: string): RunRecord | undefined {
     || (exit_code !== null && (typeof exit_code !== 'number' || !Number.isInteger(exit_code)))
     || typeof events !== 'string' || !events.startsWith('/')
     || typeof result !== 'string' || !result.startsWith('/')) return undefined
-  return { id, name, batch, effort, sandbox, pid, status, started_at, ended_at, exit_code, events, result }
+  return {
+    id, name, batch, effort,
+    // Older records have no model; keep them and simply omit it.
+    ...(typeof model === 'string' && model ? { model } : {}),
+    sandbox, pid, status, started_at, ended_at, exit_code, events, result,
+  }
+}
+
+/** Compact model label for the pane: "gpt-6.2-astra" -> "astra"; other ids stay whole. */
+export function shortModel(model: string): string {
+  return /^gpt-6\.2-./.test(model) ? model.slice('gpt-6.2-'.length) : model
 }
 
 function firstLine(text: string): string {
@@ -287,7 +297,7 @@ function glyph(status: ReturnType<typeof workerStatus>, now: number): string {
   return { done: '✓', failed: '✗', killed: '⊘', lost: '?' }[status]
 }
 
-function workerRow(worker: Worker, now: number, columns: number, nameWidth: number): string {
+export function workerRow(worker: Worker, now: number, columns: number, nameWidth: number): string {
   const { record } = worker
   const status = workerStatus(worker)
   const elapsed = formatElapsed(record.started_at, finishedAt(worker) ?? now)
@@ -297,7 +307,8 @@ function workerRow(worker: Worker, now: number, columns: number, nameWidth: numb
     : worker.resultLine || (record.exit_code === null ? 'exit unknown' : 'exit ' + record.exit_code)
   const name = clip(record.name, nameWidth)
   const padding = ' '.repeat(nameWidth - Array.from(name).length + 2)
-  const details = record.effort + ' · ' + sandbox + '  ' + elapsed
+  const effort = record.model ? record.effort + ' · ' + shortModel(record.model) : record.effort
+  const details = effort + ' · ' + sandbox + '  ' + elapsed
   return clip('  ' + glyph(status, now) + ' ' + name + padding + details
     + (activity ? '   ' + activity : ''), columns)
 }

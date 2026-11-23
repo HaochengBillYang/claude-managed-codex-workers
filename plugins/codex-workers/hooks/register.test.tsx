@@ -12,6 +12,8 @@ import {
   parseRun,
   parseUsage,
   percentColor,
+  shortModel,
+  workerRow,
   workerStatus,
 } from './register'
 import type { RunRecord, Worker } from '../types'
@@ -230,6 +232,27 @@ test('run records reject partial data, mismatched ids and unsafe pids', () => {
   expect(parseRun('{"id":', RUN.id)).toBe(undefined)
   expect(parseRun(JSON.stringify(RUN), '20261121-193012-1111')).toBe(undefined)
   expect(parseRun(JSON.stringify({ ...RUN, pid: -1 }), RUN.id)).toBe(undefined)
+})
+
+test('high-effort records show their model compactly; records without a model still load', () => {
+  const high = parseRun(JSON.stringify({ ...RUN, effort: 'high', model: 'gpt-6.2-astra' }), RUN.id)
+  expect(high).toEqual({ ...RUN, effort: 'high', model: 'gpt-6.2-astra' })
+  const highRow = workerRow({ record: high!, activity: 'drafting', lostAt: null, resultLine: '' }, 4260, 120, 8)
+  expect(highRow).toMatch(/impl\s+high · astra · ws\s+01:00\s+drafting/)
+
+  // RUN predates codex-run.sh recording the model: it has no model key at all.
+  const old = parseRun(JSON.stringify(RUN), RUN.id)
+  expect(old).toEqual(RUN)
+  expect(old && 'model' in old).toBe(false)
+  const oldRow = workerRow({ record: old!, activity: '', lostAt: null, resultLine: '' }, 4260, 120, 8)
+  expect(oldRow).toMatch(/impl\s+low · ws\s+01:00/)
+  expect(oldRow).not.toMatch(/·\s*·/)
+
+  expect(shortModel('gpt-6.2-sol')).toBe('sol')
+  expect(shortModel('gpt-6.2-')).toBe('gpt-6.2-')
+  expect(shortModel('o5-mini')).toBe('o5-mini')
+  expect(parseRun(JSON.stringify({ ...RUN, effort: 'max' }), RUN.id)).toBe(undefined)
+  expect(parseRun(JSON.stringify({ ...RUN, model: 42 }), RUN.id)).toEqual(RUN)
 })
 
 test('the live poll drives the terminal pane, band, auto-open and command toggle', async ($, on) => {
