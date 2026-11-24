@@ -36,7 +36,7 @@ Codex   5h █░░░░░░░░░    9%  resets 23:10       wk ██░
 | Path | What |
 |---|---|
 | `setup.md` | Full setup notes: roles, usage self-management, sandbox and GUI rules, machine quirks, workflow |
-| `skills/codex/` | Claude Code skill: delegation rules, brief template, review checklist, and scripts `codex-run.sh`, `codex-usage.sh`, `codex-queue.sh`, `codex-resets-refresh.sh` |
+| `skills/codex/` | Claude Code skill: delegation rules, brief template, review checklist, and scripts `codex-run.sh`, `codex-usage.sh`, `codex-queue.sh`, `codex-resets-refresh.sh`, `claude-budget.sh`, `claude-fallback-budget.sh` |
 | `plugins/codex-workers/` | Claude Code plugin (v0.2): an always-on status row above the prompt with Claude and Codex usage, and a live workflow pane of running Codex workers |
 | `.claude-plugin/marketplace.json` | Makes this repo a plugin marketplace |
 | `install.sh` | One-shot installer for a new machine |
