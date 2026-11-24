@@ -1,6 +1,6 @@
 #!/bin/bash
 # Prints Codex rate-limit status from the newest session log that has it.
-# Last line is machine-readable: STATUS=OK|THROTTLE|BLOCKED [UNTIL=..] [RESETS=n] [ADVICE=..] [REASON=..]
+# Last line is machine-readable: STATUS=OK|THROTTLE|SQUEEZE|BLOCKED [UNTIL=..] [RESETS=n] [ADVICE=..] [REASON=..]
 # Banked resets come from the Codex app-server (account/rateLimits/read), cached in
 # $CODEX_RESETS_FILE (default ~/.claude/codex-resets.json) by codex-resets-refresh.sh.
 # A cache older than 10 min is refreshed in the background, so this script never waits on it.
@@ -49,9 +49,14 @@ credits=$(jq -r 'if .credits.unlimited then "unlimited" elif .credits.has_credit
 ahead=$(( WU - WE ))
 EXTRA=""; [ "$RN" -gt 0 ] && EXTRA=" RESETS=$RN"
 soon=0; [ "$RN" -gt 0 ] && [ "$REXP" -gt 0 ] && [ $(( REXP - NOW )) -lt 259200 ] && soon=1
-if [ $PU -ge 90 ]; then
-  adv=""; if [ "$RN" -gt 0 ]; then [ $WU -ge 50 ] && adv=" ADVICE=REDEEM_RECOMMENDED" || adv=" ADVICE=REDEEM_OPTIONAL"; fi
-  echo "STATUS=BLOCKED UNTIL=$PR$EXTRA$adv REASON=5h_limit"
+SQUEEZE_MAX=${CODEX_SQUEEZE_MAX:-97}
+reached=$(jq -r ".rate_limit_reached_type // empty" <<<"$rl" 2>/dev/null)
+adv5=""; if [ "$RN" -gt 0 ]; then [ $WU -ge 50 ] && adv5=" ADVICE=REDEEM_RECOMMENDED" || adv5=" ADVICE=REDEEM_OPTIONAL"; fi
+if [ $PU -ge $SQUEEZE_MAX ] || { [ -n "$reached" ] && [ $PU -ge 90 ]; }; then
+  echo "STATUS=BLOCKED UNTIL=$PR$EXTRA$adv5 REASON=5h_limit"
+elif [ $PU -ge 90 ] && [ $WU -lt 95 ]; then
+  # SQUEEZE: use the tail of the 5h window for backlog work only (priority < 0, low effort, one at a time).
+  echo "STATUS=SQUEEZE UNTIL=$PR$EXTRA$adv5 REASON=5h=${PU}%"
 elif [ $WU -ge 95 ]; then
   adv=""; [ "$RN" -gt 0 ] && adv=" ADVICE=REDEEM_RECOMMENDED"
   echo "STATUS=BLOCKED UNTIL=$WR$EXTRA$adv REASON=weekly_limit"

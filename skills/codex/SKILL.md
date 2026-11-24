@@ -17,6 +17,7 @@ Scripts: `~/.claude/skills/codex/scripts/`
 Last line decides:
 - `STATUS=OK` → delegate normally.
 - `STATUS=THROTTLE` → low effort only; batch small tasks into one brief; do trivial edits yourself instead.
+- `STATUS=SQUEEZE` (the 5h window is 90–97% used, and weekly is below 95%) → use the tail of the window: only **backlog** work (queued with `--priority -1` or lower, low effort), one worker at a time, via `codex-queue.sh drain`. Nothing interactive or urgent. These runs may hit the limit mid-run, which is accepted (see the fallback below). `CODEX_SQUEEZE_MAX` sets the upper bound (default 97).
 - `STATUS=BLOCKED UNTIL=<epoch>` → don't call Codex. Do the work yourself if it's small; otherwise queue it, tell the user when it resets (`date -r <epoch>`), and if the session is still running at that time, resume then (CronCreate/ScheduleWakeup if available).
 - `STATUS=UNKNOWN` → proceed; the run itself produces a snapshot.
 
@@ -91,6 +92,11 @@ Always launch with the Bash tool's `run_in_background: true` (one Bash call per 
 ### Queue (for batches and for blocked budgets)
 - Instead of launching directly, queue work with `scripts/codex-queue.sh add <effort> <sandbox> <workdir> <brief> [--batch NAME] [--priority N]`, then run `scripts/codex-queue.sh drain`. It applies the budget rules itself: OK → up to 4 parallel workers (`--max N` to change), THROTTLE → one low-effort worker, BLOCKED/UNKNOWN → nothing.
 - Use the queue for any batch of 3+ independent briefs, and whenever the budget is BLOCKED: queue the work, tell the user the reset time, and drain after it (ScheduleWakeup/CronCreate if available). The plugin shows `⧗N` and notifies when a reset makes queued work runnable.
+- **Backlog** = `--priority -1` or lower, `low` effort, and safe to fail or redo: read-only analysis, tests and docs in a worktree, small mechanical changes in a worktree. Keep a few backlog briefs queued so spare capacity (THROTTLE, SQUEEZE, quiet hours) gets used instead of expiring with the window.
+- **Failures and the Claude fallback:** run records carry `failure: "rate_limit" | "error"`. `codex-queue.sh failed` lists queued tasks whose run failed.
+  - `rate_limit`: `codex-queue.sh requeue <id>` (it runs again after the reset), **or**, if the task is wanted sooner, hand the same brief to a Claude subagent (Agent tool, `model: "sonnet"` for routine work) in the same workdir. Gate it with `claude-budget.sh reserve <label>` / `settle <label>`, and skip the fallback when that says BLOCKED.
+  - `error`: read the log first. Fix the brief, or do the work yourself. Don't blindly retry.
+  - Fallback output gets the same review as Codex output.
 - Only Claude drains. Each drained worker still gets a normal review. Drained workers run detached (nohup), so completion notifications don't arrive. Check `~/.claude/codex-runs/` or the pane, or `codex-queue.sh list`.
 
 ## 6. Review (never skip)

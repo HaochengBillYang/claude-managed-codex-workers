@@ -238,6 +238,13 @@ test('usage reads percentages, reset labels and machine status details', () => {
   expect(parseUsage('truncated output').status).toBe('UNKNOWN')
 })
 
+test('usage reads the SQUEEZE status', () => {
+  const usage = parseUsage('5-hour window: 93% used, resets 20:27\nSTATUS=SQUEEZE UNTIL=1795573632 RESETS=2 ADVICE=REDEEM_OPTIONAL REASON=5h=93%')
+  expect(usage.status).toBe('SQUEEZE')
+  expect(usage.until).toBe(1795573632)
+  expect(usage.advice).toBe('REDEEM_OPTIONAL')
+})
+
 test('usage reads banked resets, optional expiry and redemption advice', () => {
   const usage = parseUsage([
     '  Banked resets: 2 (expire Tue Dec 01) - restore 5h + weekly; user redeems via Codex Usage settings or /usage',

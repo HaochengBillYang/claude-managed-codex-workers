@@ -37,9 +37,11 @@ write_record() {
     --arg sandbox "$SB" --argjson pid "$child_pid" \
     --arg status "$1" --argjson exit_code "$2" \
     --argjson started_at "$started_at" --argjson ended_at "$3" \
+    --arg failure "${FAILURE:-}" \
     '{
       $id, $name, $batch, $brief, $workdir, $effort, $model, $sandbox, $pid,
       $status, $exit_code, $started_at, $ended_at,
+      failure: (if $failure == "" then null else $failure end),
       events: ($brief + ".events.jsonl"),
       result: ($brief + ".result"),
       log: ($brief + ".log")
@@ -87,8 +89,13 @@ prune_records
 wait "$child_pid"
 rc=$?
 status=failed
+FAILURE=
 if (( rc == 0 )); then
   status=done
+elif cat "$BRIEF.log" "$BRIEF.events.jsonl" 2>/dev/null | grep -qiE "usage limit|rate.?limit.?(reached|exceeded)|rate_limit_reached|quota|\b429\b"; then
+  FAILURE=rate_limit   # Codex hit its limit mid-run: a candidate for the Claude fallback
+else
+  FAILURE=error
 fi
 write_record "$status" "$rc" "$(date +%s)"
 prune_records

@@ -164,3 +164,10 @@ Directory `$CODEX_QUEUE_DIR`, default `~/.claude/codex-queue/`. One file per tas
 - Notifications (`$.ui.toast`), once per transition, kept in state:
   1. Codex status goes from `BLOCKED` to `OK` or `THROTTLE` while N > 0: "Codex limit reset: N queued task(s) ready, ask Claude to drain the queue".
   2. `ADVICE=` first appears or changes: "Codex: <advice in words> (↺K banked)".
+
+## v0.2.7 (squeeze and fallback)
+
+- `codex-usage.sh` gains `STATUS=SQUEEZE` when the 5h window is 90–97% used (`CODEX_SQUEEZE_MAX`, default 97) and weekly is below 95%. BLOCKED starts at 97%, or at 90%+ when Codex itself reports `rate_limit_reached_type`.
+- `codex-queue.sh drain` under SQUEEZE: one worker at a time, only `low` effort entries with `priority < 0` (backlog). New `failed [--json]` (launched entries whose latest run failed, with the failure reason) and `requeue <id>`.
+- `codex-run.sh` records `failure: "rate_limit" | "error"` (or null) in run records.
+- Plugin: SQUEEZE parses and shows in yellow, and BLOCKED→SQUEEZE counts as runnable for the queue notification.

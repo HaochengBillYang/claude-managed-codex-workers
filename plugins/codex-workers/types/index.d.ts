@@ -33,7 +33,7 @@ export type CodexUsage = {
   weekly: UsageWindow | null
   resets: { count: number; expires: string | null } | null
   advice: string | null
-  status: 'OK' | 'THROTTLE' | 'BLOCKED' | 'UNKNOWN'
+  status: 'OK' | 'THROTTLE' | 'SQUEEZE' | 'BLOCKED' | 'UNKNOWN'
   until: number | null
   reason: string | null
 }

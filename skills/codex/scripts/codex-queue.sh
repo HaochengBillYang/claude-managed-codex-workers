@@ -15,6 +15,8 @@ usage() {
 Usage: codex-queue.sh add <effort> <sandbox> <workdir> <brief> [--batch NAME] [--priority N] [--model M]
        codex-queue.sh list [--json]
        codex-queue.sh drain [--max N] [--dry-run]
+       codex-queue.sh failed [--json]
+       codex-queue.sh requeue <id>
        codex-queue.sh remove <id>
        codex-queue.sh prune
 EOF
@@ -157,6 +159,7 @@ drain() {
     case ${usage_output##*$'\n'} in
       STATUS=OK|STATUS=OK\ *) status=OK ;;
       STATUS=THROTTLE|STATUS=THROTTLE\ *) status=THROTTLE ;;
+      STATUS=SQUEEZE|STATUS=SQUEEZE\ *) status=SQUEEZE ;;
       STATUS=BLOCKED|STATUS=BLOCKED\ *) status=BLOCKED ;;
     esac
   fi
@@ -165,7 +168,7 @@ drain() {
       occupied=$(occupied_slots) || exit 1
       slots=$((max - occupied))
       ;;
-    THROTTLE)
+    THROTTLE|SQUEEZE)
       # One worker at a time, not one per drain: running workers use up the slot.
       occupied=$(occupied_slots) || exit 1
       slots=$((1 - occupied))
@@ -181,6 +184,8 @@ drain() {
         IFS= read -r -d '' model
     } < <(jq -j '[.id, .effort, .sandbox, .workdir, .brief, .batch, (.model // "")] | .[] + "\u0000"' <<< "$entry") || exit 1
     if [[ $status == THROTTLE && $effort != low ]]; then continue; fi
+    # SQUEEZE (the 5h window is 90-97% used): backlog work only, i.e. priority < 0 and low effort.
+    if [[ $status == SQUEEZE ]] && ! jq -e '.effort == "low" and ((.priority // 0) < 0)' <<< "$entry" >/dev/null; then continue; fi
     log=$brief.queue.out
     if [[ $dry_run == yes ]]; then
       printf 'Would launch %s\n' "$id"
@@ -205,6 +210,36 @@ case ${1:-} in
     esac
     ;;
   drain) shift; drain "$@" ;;
+  failed)
+    # Launched entries whose latest run record (same brief, started at or after launch) failed.
+    [[ $# -le 2 ]] || usage
+    out=$(for entry in "$queue_dir"/*.json; do
+      jq -c 'select(.status == "launched")' "$entry" 2>/dev/null
+    done | while IFS= read -r e; do
+      brief=$(jq -r '.brief' <<< "$e"); since=$(jq -r '(.launched_at // 0) - 5' <<< "$e")
+      run=$(for r in "$runs_dir"/*.json; do
+        jq -c --arg b "$brief" --argjson s "$since" 'select(.brief == $b and .started_at >= $s)' "$r" 2>/dev/null
+      done | jq -sc 'sort_by(.started_at) | last // empty')
+      [[ -n $run ]] || continue
+      jq -c --argjson run "$run" 'select($run.status == "failed" or $run.status == "killed")
+        | {id, name, batch, effort, priority, brief, workdir,
+           failure: ($run.failure // $run.status), exit_code: $run.exit_code, run_id: $run.id}' <<< "$e"
+    done | jq -s '.')
+    case ${2:-} in
+      --json) printf '%s\n' "$out" ;;
+      '') jq -r '.[] | [.id, .failure, .effort, .name, .brief] | @tsv' <<< "$out" ;;
+      *) usage ;;
+    esac
+    ;;
+  requeue)
+    [[ $# -eq 2 && $2 =~ ^[0-9]{8}-[0-9]{6}-[[:alnum:]]{4}$ ]] || usage
+    lock_queue
+    file=$queue_dir/$2.json
+    [[ -f $file ]] || fail "no such entry: $2"
+    tmp=$(mktemp "$file.XXXXXX") || exit 1
+    jq '.status = "queued" | .launched_at = null | .run_log = null' "$file" > "$tmp" && mv -f -- "$tmp" "$file"
+    printf '%s\n' "$2"
+    ;;
   remove)
     [[ $# -eq 2 && $2 =~ ^[0-9]{8}-[0-9]{6}-[[:alnum:]]{4}$ ]] || usage
     lock_queue

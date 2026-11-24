@@ -260,7 +260,7 @@ function usageWindow(match: RegExpMatchArray | null): UsageWindow | null {
 }
 
 export function parseUsage(text: string): CodexUsage {
-  const status = text.match(/^\s*STATUS=(OK|THROTTLE|BLOCKED|UNKNOWN)\b([^\r\n]*)/m)
+  const status = text.match(/^\s*STATUS=(OK|THROTTLE|SQUEEZE|BLOCKED|UNKNOWN)\b([^\r\n]*)/m)
   const details = status?.[2] ?? ''
   const metadata = details.split(/\bREASON=/, 1)[0] ?? ''
   const until = metadata.match(/\bUNTIL=(\d+)\b/)
@@ -286,7 +286,7 @@ async function notifyUsage($: EngineInterface, snapshot: CodexUsage, queued: num
   const previous = await read($, notified)
   if (previous.status === status && previous.advice === advice) return
   await update($, notified, () => ({ status, advice }))
-  if (previous.status === 'BLOCKED' && (status === 'OK' || status === 'THROTTLE') && queued > 0) {
+  if (previous.status === 'BLOCKED' && (status === 'OK' || status === 'THROTTLE' || status === 'SQUEEZE') && queued > 0) {
     $.ui.toast(`Codex limit reset: ${queued} queued task(s) ready, ask Claude to drain the queue`)
   }
   if (advice && advice !== previous.advice) {
@@ -398,7 +398,7 @@ export function percentColor(percent: number | null): UsageColor | undefined {
 }
 
 function statusColor(status: CodexUsage['status']): UsageColor | undefined {
-  return status === 'BLOCKED' ? 'red' : status === 'THROTTLE' ? 'yellow' : undefined
+  return status === 'BLOCKED' ? 'red' : status === 'THROTTLE' || status === 'SQUEEZE' ? 'yellow' : undefined
 }
 
 function percentage(percent: number | null): Segment {

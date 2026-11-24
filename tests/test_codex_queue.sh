@@ -163,6 +163,31 @@ check 'a second drain counts the live launcher before a run record exists' \
   equal "$("$QUEUE" drain --max 1)" 'DRAINED=0 QUEUED=1 STATUS=OK'
 check 'the concurrent entry is still queued' equal "$("$QUEUE" list --json | jq -r '.[].id')" "$second"
 
+echo '== SQUEEZE, failed and requeue'
+fixture squeeze
+enqueue low normal-low --priority 5 >/dev/null || exit 1
+enqueue medium backlog-medium --priority -1 >/dev/null || exit 1
+backlog=$(enqueue low backlog-low --priority -1) || exit 1
+export QUEUE_TEST_STATUS='SQUEEZE UNTIL=1795300212 REASON=5h=93%'
+check 'SQUEEZE launches only low-effort backlog (priority < 0)' \
+  equal "$("$QUEUE" drain)" "$(printf '%s\n' "$backlog" 'DRAINED=1 QUEUED=2 STATUS=SQUEEZE')"
+wait_for_file "$WORK/backlog-low.md.args" >/dev/null
+printf '{"status":"running","pid":%s}\n' "$$" > "$CODEX_RUNS_DIR/squeeze-live.json"
+enqueue low backlog-two --priority -2 >/dev/null || exit 1
+check 'SQUEEZE launches nothing while a worker is running' \
+  equal "$("$QUEUE" drain)" 'DRAINED=0 QUEUED=3 STATUS=SQUEEZE'
+rm -f "$CODEX_RUNS_DIR/squeeze-live.json"
+launched_at=$(jq -r '.launched_at' "$CODEX_QUEUE_DIR/$backlog.json")
+jq -n --arg b "$WORK/backlog-low.md" --argjson s "$launched_at" \
+  '{id:"r1", brief:$b, status:"failed", exit_code:1, failure:"rate_limit", started_at:$s}' > "$CODEX_RUNS_DIR/r1.json"
+check 'failed lists the launched entry whose run hit the limit' \
+  equal "$("$QUEUE" failed --json | jq -r '.[] | "\(.id) \(.failure)"')" "$backlog rate_limit"
+check 'requeue puts it back in the queue' "$QUEUE" requeue "$backlog"
+check 'a requeued entry is queued again with launch fields cleared' jq -e \
+  '.status == "queued" and .launched_at == null and .run_log == null' "$CODEX_QUEUE_DIR/$backlog.json"
+check 'failed no longer lists a requeued entry' equal "$("$QUEUE" failed --json | jq 'length')" 0
+unset QUEUE_TEST_STATUS
+
 echo '== Remove and prune'
 fixture maintenance
 removed=$(enqueue low remove) || exit 1
