@@ -8,7 +8,9 @@
 
 Coding agents are good at executing a clear spec and weak at deciding what the spec should be. Running one agent for everything wastes the stronger model on routine work, and it burns through a single subscription's limits. This repo splits the two roles across two tools you may already pay for. Claude keeps the judgment: scope, architecture, review, and the final verdict. Codex gets the volume: implementation, tests, mechanical changes. Usage limits on both sides are read live, so the manager throttles, queues or pauses work before a limit is hit, and you can watch every worker in a live pane instead of guessing what's running.
 
-<!-- TODO(owner): add a screenshot of the codex-workers pane and status row with 2–3 workers running as docs/screenshot.png, then add above the text render: ![codex-workers pane](docs/screenshot.png) -->
+![Claude Code with the codex-workers pane: a batch of 12 Codex workers running, usage footer for Claude and Codex, and the status row](docs/screenshot.png)
+
+*A real session: the PM conversation on the left; on the right, the codex-workers pane with a 12-worker demo batch running (each with its effort, model, sandbox and elapsed time), the Claude and Codex usage footer, and banked resets. The status row is at the bottom.*
 
 What the plugin draws in Claude Code: the status row above the prompt, and the footer of the workers pane. This is text rendered by the plugin from its test fixtures, so the numbers are examples.
 
