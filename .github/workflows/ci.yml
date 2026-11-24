@@ -33,6 +33,8 @@ jobs:
           ruby-version: '3.3.11'
       - name: Test the rate limiter
         run: ruby -Ilib -Itest test/test_rate_limiter.rb
+      - name: Test the Codex queue
+        run: bash tests/test_codex_queue.sh
       - uses: actions/setup-node@v4
         with:
           node-version: '24'

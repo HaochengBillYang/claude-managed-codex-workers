@@ -24,6 +24,7 @@ const BAND_WINDOW = 60
 const SPINNER = Array.from('⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏')
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const DRIFT_INTERVAL = 60
+const QUEUE_INTERVAL = 5
 const UNKNOWN_USAGE: CodexUsage = {
   fiveHour: null,
   weekly: null,
@@ -44,6 +45,10 @@ const seenIds = atom({ plugin: 'codex-workers', key: 'seenIds' } as const,
   [], { shape: 'seen-1' })
 const drift = atom({ plugin: 'codex-workers', key: 'drift' } as const, null)
 const paneOpen = atom({ plugin: 'codex-workers', key: 'paneOpen' } as const, false)
+const queue = atom({ plugin: 'codex-workers', key: 'queue' } as const,
+  { queued: 0 }, { shape: 'queue-1' })
+const notified = atom({ plugin: 'codex-workers', key: 'notified' } as const,
+  { status: 'UNKNOWN', advice: null }, { shape: 'notified-1' })
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -81,6 +86,13 @@ async function readJson(readFile: (path: string) => Promise<string>, path: strin
   } catch {
     return undefined
   }
+}
+
+async function countQueued($: EngineInterface, dir: string): Promise<number> {
+  const entries = await $.fs.list(dir).catch(() => [])
+  const tasks = await Promise.all(entries.filter(entry => entry.kind === 'file' && entry.name.endsWith('.json'))
+    .map(entry => readJson(path => $.fs.read(path), dir + '/' + entry.name)))
+  return tasks.filter(task => task?.status === 'queued').length
 }
 
 export async function detectDrift(
@@ -265,6 +277,23 @@ export function parseUsage(text: string): CodexUsage {
   }
 }
 
+function adviceInWords(advice: string | null): string {
+  return advice?.toLowerCase().replace(/_/g, ' ') ?? ''
+}
+
+async function notifyUsage($: EngineInterface, snapshot: CodexUsage, queued: number) {
+  const { status, advice } = snapshot
+  const previous = await read($, notified)
+  if (previous.status === status && previous.advice === advice) return
+  await update($, notified, () => ({ status, advice }))
+  if (previous.status === 'BLOCKED' && (status === 'OK' || status === 'THROTTLE') && queued > 0) {
+    $.ui.toast(`Codex limit reset: ${queued} queued task(s) ready, ask Claude to drain the queue`)
+  }
+  if (advice && advice !== previous.advice) {
+    $.ui.toast(`Codex: ${adviceInWords(advice)} (↺${snapshot.resets?.count ?? 0} banked)`)
+  }
+}
+
 export function extractClaudeUsage(snapshot: Pick<SessionUsage, 'context' | 'rateLimits' | 'cost'>): ClaudeUsage {
   function window(kind: string): ClaudeUsageWindow | null {
     const limit = snapshot.rateLimits.find(item => item.kind === kind)
@@ -405,7 +434,7 @@ function clipRow(segments: Segment[], columns: number): Segment[] {
 
 export function layoutBand(
   workers: Worker[], now: number, claude: ClaudeUsage, codex: CodexUsage, columns: number,
-  versionDrift: VersionDrift | null = null,
+  versionDrift: VersionDrift | null = null, queued = 0,
 ): Segment[] {
   const counts = bandCounts(workers, now)
   const labels = Object.entries(counts).filter(([, count]) => count > 0)
@@ -431,6 +460,10 @@ export function layoutBand(
   const notice: Segment[] = versionDrift ? [{ text: ' │ update ready: /reload-plugins', color: 'yellow' }] : []
   const full = [...claudeHead, ...(hasClaudeWindows ? [{ text: ' ·' }, ...context] : []), ...codexTail]
   const wide = [...full, hint, ...notice]
+  if (queued > 0) {
+    const withQueue = [...full, { text: ' · ⧗' + queued }, hint, ...notice]
+    if (rowWidth(withQueue) <= columns) return withQueue
+  }
   if (rowWidth(wide) <= columns) return wide
   if (versionDrift) {
     const withContext = [...full, ...notice]
@@ -604,6 +637,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const home = (await $.process.run(['/usr/bin/printenv', 'HOME'], { timeoutMs: 2000 })
       .then(r => r.stdout.trim(), () => ''))
+    const queueDir = home ? home + '/.claude/codex-queue' : ''
     if (home) {
       RUNS_DIR = home + '/.claude/codex-runs'
       USAGE_SCRIPT = home + '/.claude/skills/codex/scripts/codex-usage.sh'
@@ -622,6 +656,8 @@ export const register: Register = on => {
     let lastUsage = -Infinity
     let pendingUsage = true
     let refreshingUsage = false
+    let lastQueue = -Infinity
+    let queued = 0
 
     async function refreshUsage(now: number) {
       if (!USAGE_SCRIPT || refreshingUsage || (!pendingUsage && now - lastUsage < 30)) return
@@ -631,6 +667,7 @@ export const register: Register = on => {
       try {
         const snapshot = await $.process.run([USAGE_SCRIPT], { timeoutMs: 5000 })
           .then(result => parseUsage(result.stdout), () => UNKNOWN_USAGE)
+        await notifyUsage($, snapshot, queued)
         await update($, usage, () => snapshot)
       } catch {
         pendingUsage = true
@@ -653,6 +690,11 @@ export const register: Register = on => {
         if (now - lastClaudeUsage >= 30) {
           lastClaudeUsage = now
           await refreshClaudeUsage($, getMeasurement)
+        }
+        if (queueDir && now - lastQueue >= QUEUE_INTERVAL) {
+          lastQueue = now
+          queued = await countQueued($, queueDir)
+          await update($, queue, current => current.queued === queued ? current : { queued })
         }
         if (!RUNS_DIR) return
         const previous = await read($, runs)
@@ -719,8 +761,8 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const [{ workers, now }, codex, claude, nowMs, versionDrift] = await Promise.all([
-      read($, runs), read($, usage), read($, claudeUsage), $.clock.now(), read($, drift),
+    const [{ workers, now }, codex, claude, nowMs, versionDrift, { queued }] = await Promise.all([
+      read($, runs), read($, usage), read($, claudeUsage), $.clock.now(), read($, drift), read($, queue),
     ])
     const groups = groupWorkers(workers, now)
     const columns = e.props.bodyColumns
@@ -741,7 +783,7 @@ export const register: Register = on => {
     if (resets && resets.count > 0) {
       const count = '↺' + resets.count + (resets.count === 1 ? ' banked reset' : ' banked resets')
       const expiry = resets.expires ? ' · next expires ' + resets.expires : ''
-      const adviceText = codex.advice ? codex.advice.toLowerCase().replace(/_/g, ' ') : ''
+      const adviceText = adviceInWords(codex.advice)
       const color = adviceText ? 'yellow' as const : undefined
       const oneLine = count + expiry + (adviceText ? ' · ' + adviceText : '')
       const indent = Array.from(FOOTER_INDENT.text).length
@@ -752,6 +794,10 @@ export const register: Register = on => {
         footer.push(clipRow([FOOTER_INDENT, { text: count + expiry, color }], columns))
         footer.push(clipRow([FOOTER_INDENT, { text: adviceText, color }], columns))
       }
+    }
+    if (queued > 0) {
+      const text = '⧗' + queued + (queued === 1 ? ' queued task' : ' queued tasks')
+      footer.push(clipRow([FOOTER_INDENT, { text }], columns))
     }
     return (
       <Box flexDirection="column">
@@ -790,10 +836,10 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Text } = $.ui.resolve(e)
-    const [{ workers, now }, codex, claude, versionDrift] = await Promise.all([
-      read($, runs), read($, usage), read($, claudeUsage), read($, drift),
+    const [{ workers, now }, codex, claude, versionDrift, { queued }] = await Promise.all([
+      read($, runs), read($, usage), read($, claudeUsage), read($, drift), read($, queue),
     ])
-    const row = layoutBand(workers, now, claude, codex, e.props.bodyColumns, versionDrift)
+    const row = layoutBand(workers, now, claude, codex, e.props.bodyColumns, versionDrift, queued)
     return (
       <Box flexDirection="row">
         {row.map(({ text, color, dimColor }) => <Text color={color} dimColor={dimColor} wrap="truncate-end">{text}</Text>)}

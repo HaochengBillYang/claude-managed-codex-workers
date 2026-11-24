@@ -136,3 +136,31 @@ The pane footer uses fixed columns: an 8-character label, then window cells of f
 The plugin checks the installed version every 60 seconds on its existing poll.
 When a newer version is installed, the band and pane show a yellow reload
 notice that stays visible until `/reload-plugins`.
+
+## v0.2.6 (task queue)
+
+### Contract D: queue
+Directory `$CODEX_QUEUE_DIR`, default `~/.claude/codex-queue/`. One file per task, `<id>.json`, where `id` = `YYYYMMDD-HHMMSS-<rand4>`. Written atomically (tmp + mv).
+```json
+{ "id": "...", "name": "impl", "batch": "adhoc", "brief": "/abs/brief.md", "workdir": "/abs/dir",
+  "effort": "low|medium|high", "sandbox": "read-only|workspace-write", "model": null,
+  "priority": 0, "created_at": 1795300212, "status": "queued|launched", "launched_at": null, "run_log": null }
+```
+- `skills/codex/scripts/codex-queue.sh add <effort> <sandbox> <workdir> <brief> [--batch NAME] [--priority N] [--model M]`: validates that the brief exists and the workdir is a directory, then writes a `queued` entry and prints its id.
+- `codex-queue.sh list [--json]`: queued entries, highest priority first, then oldest.
+- `codex-queue.sh drain [--max N] [--dry-run]`: the only launcher. Runs `codex-usage.sh` and reads its STATUS:
+  - `BLOCKED` or `UNKNOWN`: launch nothing.
+  - `THROTTLE`: launch at most 1, and only `low`-effort entries.
+  - `OK`: launch until running workers reach N (default 4).
+  - Running workers are run records with `status=running` whose pid is alive.
+  - Each launch runs `codex-run.sh` in the background with `CODEX_BATCH` (and `CODEX_MODEL` if set), nohup, output to `<brief>.queue.out`. The entry becomes `launched`, with `launched_at` and `run_log`.
+  - Prints one line per launched id, then `DRAINED=<n> QUEUED=<remaining> STATUS=<status>`.
+- `codex-queue.sh remove <id>`, and `prune` (deletes `launched` entries older than 7 days).
+- Only Claude runs `drain`. The plugin never launches anything.
+
+### Plugin
+- Reads the queue dir on the existing poll. Counts `queued` entries.
+- Band: Codex segment shows ` · ⧗N` when N > 0 (dropped before ↺ when narrowing). Pane: a `⧗N queued` line under the banked-resets line.
+- Notifications (`$.ui.toast`), once per transition, kept in state:
+  1. Codex status goes from `BLOCKED` to `OK` or `THROTTLE` while N > 0: "Codex limit reset: N queued task(s) ready, ask Claude to drain the queue".
+  2. `ADVICE=` first appears or changes: "Codex: <advice in words> (↺K banked)".

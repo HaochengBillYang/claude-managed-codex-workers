@@ -409,6 +409,20 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   let pidChecks = 0
   let manifestReads = 0
   let registryReads = 0
+  let queueReads = 0
+  let queueExists = true
+  let usageStatus: string | undefined
+  const toasts: string[] = []
+  const queueDir = '/Users/test/.claude/codex-queue'
+  const queueFiles: Record<string, string> = {
+    'first.json': '{"status":"queued"}',
+    'second.json': '{"status":"queued"}',
+    'third.json': '{"status":"queued"}',
+    'launched.json': '{"status":"launched"}',
+    'partial.json': '{"status":',
+    'invalid.json': 'invalid',
+    'pending.tmp': '{"status":"queued"}',
+  }
   let installed = '0.2.4'
   const tailReads: { offset?: number; length?: number }[] = []
   const usageFileWrites: { path: string; text: string }[] = []
@@ -437,14 +451,26 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
     })
   })
   on('clock.now', () => ({ value: now * 1000 }))
-  on('fs.list', () => ({
-    value: [{ name: RUN.id + '.json', kind: 'file', size: 1, mtimeMs: 0, isLink: false }],
-  }))
+  on('fs.list', (_, e) => {
+    if (e.path === queueDir) {
+      queueReads += 1
+      if (!queueExists) throw new Error('Directory missing')
+      return { value: Object.keys(queueFiles).map(name => ({
+        name, kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false,
+      })) }
+    }
+    expect(e.path).toBe('/Users/test/.claude/codex-runs')
+    return { value: [{ name: RUN.id + '.json', kind: 'file', size: 1, mtimeMs: 0, isLink: false }] }
+  })
   on('fs.stat', (_, e) => {
     expect(e.path).toBe(RUN.events)
     return { value: { kind: 'file', size: 70000, mtimeMs: 0, isLink: false } }
   })
   on('fs.read', (_, e) => {
+    if (e.path.startsWith(queueDir + '/')) {
+      expect(e.path.endsWith('.json')).toBe(true)
+      return { value: queueFiles[e.path.slice(queueDir.length + 1)] ?? '' }
+    }
     if (e.path.endsWith('/.claude-plugin/plugin.json')) {
       manifestReads += 1
       return { value: JSON.stringify({ version: '0.2.4' }) }
@@ -484,12 +510,16 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
     const stdout = isKill ? '' : [
       '5-hour window: 9% used, resets Sat Nov 21 23:10',
       'Weekly window: 16% used, resets Tue Nov 24 14:49',
-      ...(record.status === 'running' ? [
+      ...(usageStatus !== undefined ? [usageStatus] : record.status === 'running' ? [
         '  Banked resets: 2 (expire Tue Dec 01) - restore 5h + weekly',
         'STATUS=THROTTLE RESETS=2 ADVICE=REDEEM_BEFORE_EXPIRY REASON=weekly pace',
       ] : ['STATUS=OK RESETS=1']),
     ].join('\n')
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
   })
   on('ui.open', () => {
     isOpen = true
@@ -564,6 +594,9 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   expect(claudeRow.indexOf('%')).toBe(codexRow.indexOf('%'))
   expect(claudeRow.indexOf('%', claudeRow.indexOf('wk'))).toBe(codexRow.lastIndexOf('%'))
   expect((await paneUi.find({ type: 'Box', text: /^ {8}↺/ }))?.text).toBe(resetsRow)
+  expect((await paneUi.find({ type: 'Box', text: /^ {8}⧗/ }))?.text).toBe('        ⧗3 queued tasks')
+  expect(toasts).toEqual(['Codex: redeem before expiry (↺2 banked)'])
+  expect(queueReads).toBe(1)
   expect((await paneUi.find({ type: 'Text', text: /^↺2 banked resets/ }))?.props.color).toBe('yellow')
   expect((await paneUi.find({ type: 'Text', text: /^ 70%$/ }))?.props.color).toBe('yellow')
   expect((await paneUi.find({ type: 'Text', text: /^THROTTLE$/ }))?.props.color).toBe('yellow')
@@ -588,12 +621,16 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   expect(opens).toBe(1)
   expect(pidChecks).toBe(1)
   expect(tailReads).toEqual([{ offset: 4464, length: 65536 }])
-  await bandUi.redraw()
-  expect(await bandText()).toMatch(/Codex ⠋ 1 running · 5h 9% · wk 16% · ↺2/)
+  await bandUi.redraw({ ...band.props, bodyColumns: 140 })
+  expect(await bandText()).toBe('Claude 5h 70% · wk 90% · ctx 91% │ Codex ⠋ 1 running · 5h 9% · wk 16% · ↺2 · ⧗3 │ /codex-workers')
+  await bandUi.redraw({ ...band.props, bodyColumns: 70 })
+  expect(await bandText()).toBe('Claude 5h 70% · wk 90% │ Codex ⠋ 1 running · 5h 9% · wk 16% · ↺2')
   expect((await bandUi.find({ type: 'Text', text: /^Codex$/ }))?.props.color).toBe('yellow')
+  await bandUi.redraw(band.props)
 
   // Let the first tick see a terminal record only one second later.
   record = { ...RUN, status: 'done', exit_code: 0, ended_at: 5001 }
+  queueExists = false
   now = 5001
   tick()
   expect(await waitForRow(/Added fixture tests/)).toMatch(/✓.*13:21/)
@@ -603,6 +640,8 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   expect(pidChecks).toBe(1)
   expect(tailReads.length).toBe(1)
   expect(usageCalls).toBe(2)
+  expect(queueReads).toBe(1)
+  expect((await paneUi.find({ type: 'Box', text: /^ {8}⧗/ }))?.text).toBe('        ⧗3 queued tasks')
   await bandUi.redraw()
   expect(await bandText()).toMatch(/Codex 1 done/)
   expect(claudeUsageCalls).toBe(1)
@@ -612,6 +651,8 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   claudeSnapshot = { ...CLAUDE_USAGE, context: { window: 200000, percent: 42 }, rateLimits: [] }
   tick()
   expect(await waitForRow(/^42%$/)).toBe('42%')
+  expect(queueReads).toBe(2)
+  expect(await paneUi.find({ type: 'Box', text: /^ {8}⧗/ })).toBe(undefined)
   const placeholder = (label: string) => label + ' '.repeat(16) + '—' + ' '.repeat(18)
   expect((await paneUi.find({ type: 'Box', text: /^Claude {2}5h/ }))?.text)
     .toBe('Claude  ' + placeholder('5h') + '   ' + placeholder('wk') + '   ctx 42%')
@@ -660,6 +701,41 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   expect(isOpen).toBe(false)
   expect((await $.command.run(command)).text).toBe('Codex workers pane opened.')
   expect(opens).toBe(2)
+
+  queueExists = true
+  const firstAdvice = 'Codex: redeem before expiry (↺2 banked)'
+  const changedAdvice = 'Codex: redeem recommended (↺2 banked)'
+  const reset = 'Codex limit reset: 3 queued task(s) ready, ask Claude to drain the queue'
+  async function advance(status: string, paneText: RegExp) {
+    usageStatus = status
+    now += 30
+    tick()
+    await waitForRow(paneText)
+  }
+  await advance('STATUS=BLOCKED RESETS=2 ADVICE=REDEEM_BEFORE_EXPIRY', /^BLOCKED$/)
+  expect(toasts).toEqual([firstAdvice, firstAdvice])
+  await advance('STATUS=OK RESETS=2 ADVICE=REDEEM_RECOMMENDED', /banked resets · redeem recommended/)
+  expect(toasts).toEqual([firstAdvice, firstAdvice, reset, changedAdvice])
+  await advance('STATUS=OK RESETS=3 ADVICE=REDEEM_RECOMMENDED', /↺3 banked resets/)
+  expect(toasts).toEqual([firstAdvice, firstAdvice, reset, changedAdvice])
+  await advance('STATUS=BLOCKED', /^BLOCKED$/)
+  expect(await paneUi.find({ type: 'Box', text: /^ {8}↺/ })).toBe(undefined)
+  expect((await paneUi.find({ type: 'Box', text: /^ {8}⧗/ }))?.text).toBe('        ⧗3 queued tasks')
+  await advance('STATUS=THROTTLE', /^THROTTLE$/)
+  expect(toasts).toEqual([firstAdvice, firstAdvice, reset, changedAdvice, reset])
+
+  queueExists = false
+  await advance('STATUS=BLOCKED', /^BLOCKED$/)
+  await advance('STATUS=OK RESETS=2 ADVICE=REDEEM_RECOMMENDED', /^OK$/)
+  const expectedToasts = [firstAdvice, firstAdvice, reset, changedAdvice, reset, changedAdvice]
+  expect(toasts).toEqual(expectedToasts)
+
+  // Restart the polling hook with the same host state, as on a reload.
+  const restartedTimer = new Promise<void>(resolve => { timerRegistered = resolve })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await restartedTimer
+  await advance('STATUS=OK RESETS=4 ADVICE=REDEEM_RECOMMENDED', /↺4 banked resets/)
+  expect(toasts).toEqual(expectedToasts)
   await paneUi.unmount()
   await bandUi.unmount()
 })

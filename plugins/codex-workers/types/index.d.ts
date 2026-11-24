@@ -58,6 +58,8 @@ declare module 'claude-code' {
       seenIds: Shaped<string[]>
       paneOpen: boolean
       drift: VersionDrift | null
+      queue: Shaped<{ queued: number }>
+      notified: Shaped<Pick<CodexUsage, 'status' | 'advice'>>
     }
   }
 }

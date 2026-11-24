@@ -88,6 +88,11 @@ Brief rules learned the hard way:
 ```
 Always launch with the Bash tool's `run_in_background: true` (one Bash call per worker, description "Codex worker: <name>") so each shows as a native background shell, and prefix `CODEX_BATCH="<workflow name>"` to group parallel workers. The `codex-workers` mod (`/codex-workers` toggles its pane) draws them live from `~/.claude/codex-runs/*.json` and `<brief>.md.events.jsonl`. Output: `<brief>.result` (Codex's final report), `<brief>.log` (full log). The wrapper prints usage afterward.
 
+### Queue (for batches and for blocked budgets)
+- Instead of launching directly, queue work with `scripts/codex-queue.sh add <effort> <sandbox> <workdir> <brief> [--batch NAME] [--priority N]`, then run `scripts/codex-queue.sh drain`. It applies the budget rules itself: OK → up to 4 parallel workers (`--max N` to change), THROTTLE → one low-effort worker, BLOCKED/UNKNOWN → nothing.
+- Use the queue for any batch of 3+ independent briefs, and whenever the budget is BLOCKED: queue the work, tell the user the reset time, and drain after it (ScheduleWakeup/CronCreate if available). The plugin shows `⧗N` and notifies when a reset makes queued work runnable.
+- Only Claude drains. Each drained worker still gets a normal review. Drained workers run detached (nohup), so completion notifications don't arrive. Check `~/.claude/codex-runs/` or the pane, or `codex-queue.sh list`.
+
 ## 6. Review (never skip)
 
 - In this repo, run `tests/review.sh` first. It covers syntax, tests, plugin validate and test, installed-vs-repo sync, and version monotonicity. Add `--live` only when a real Codex run is worth its usage.
