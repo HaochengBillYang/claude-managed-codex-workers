@@ -10,7 +10,7 @@ Claude launches workers with the Bash tool `run_in_background: true`, so each al
 
 ## Contract A: run records
 
-Directory: `$CODEX_RUNS_DIR`, default `~/.claude/codex-runs/` (absolute: `/Users/xseven/.claude/codex-runs/`).
+Directory: `$CODEX_RUNS_DIR`, default `~/.claude/codex-runs/`.
 One file per run: `<id>.json`, where `id` = `YYYYMMDD-HHMMSS-<pid>`. It is written atomically (write `<id>.json.tmp`, then `mv`).
 
 ```json

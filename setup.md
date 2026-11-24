@@ -16,7 +16,7 @@ Last updated: 2026-11-21. Source of truth if a chat is lost or compacted.
 | Claude writer budget | `~/.claude/skills/codex/scripts/claude-budget.sh <reserve\|settle\|status> [label]`, reading `~/.claude/claude-usage.json` (written by the `codex-workers` plugin) and keeping `~/.claude/claude-writer-ledger.json` |
 | Permission allow rules for the three scripts (usage, run, Claude budget) | `~/.claude/settings.json`. Added by the user or by `install.sh`; Claude may not edit its own permissions. |
 | Worker visualizer plugin | `codex-workers`, installed at user scope from this repo's marketplace. Source: `plugins/codex-workers/`. |
-| Claude memory | `~/.claude/projects/-Users-xseven/memory/` (`codex-delegation.md`, `github-account.md`) |
+| Claude memory | `~/.claude/projects/<project-key>/memory/` (`codex-delegation.md`, `github-account.md`) |
 | GitHub | https://github.com/HaochengBillYang |
 
 ## Usage self-management

@@ -1,11 +1,40 @@
 # claude-managed-codex-workers
 
-A setup where **Claude Code is the project manager and Codex (GPT) is the worker**. Claude scopes, designs, reviews and gives the verdict. Codex workers implement, test and do GUI tasks. You can watch them run live in Claude Code.
+[![CI](https://github.com/HaochengBillYang/claude-managed-codex-workers/actions/workflows/ci.yml/badge.svg)](https://github.com/HaochengBillYang/claude-managed-codex-workers/actions/workflows/ci.yml)
+
+**Claude Code as the project manager, Codex as the workers.** Claude scopes the work, makes the design and taste calls, writes a brief per task, and reviews every result. Codex (GPT) workers do the execution: code to spec, tests, refactors and headless GUI tasks.
+
+## Why this exists
+
+Coding agents are good at executing a clear spec and weak at deciding what the spec should be. Running one agent for everything wastes the stronger model on routine work, and it burns through a single subscription's limits. This repo splits the two roles across two tools you may already pay for. Claude keeps the judgment: scope, architecture, review, and the final verdict. Codex gets the volume: implementation, tests, mechanical changes. Usage limits on both sides are read live, so the manager throttles, queues or pauses work before a limit is hit, and you can watch every worker in a live pane instead of guessing what's running.
+
+<!-- TODO(owner): add a screenshot of the codex-workers pane and status row with 2–3 workers running as docs/screenshot.png, then add above the text render: ![codex-workers pane](docs/screenshot.png) -->
+
+What the plugin draws in Claude Code: the status row above the prompt, and the footer of the workers pane. This is text rendered by the plugin from its test fixtures, so the numbers are examples.
+
+```text
+Claude 5h 70% · wk 90% · ctx 91% │ Codex ⠋ 1 running · 5h 9% · wk 16% · ↺2 · ⧗3 │ /codex-workers
+
+Claude  5h ███████░░░   70%  resets 19:33       wk █████████░   90%  resets Fri 19:23   ctx 91%
+Codex   5h █░░░░░░░░░    9%  resets 23:10       wk ██░░░░░░░░   16%  resets Tue 14:49   THROTTLE
+        ↺2 banked resets · next expires Tue Dec 01 · redeem before expiry
+        ⧗3 queued tasks
+```
+
+## How it works
+
+- **Delegation skill** (`skills/codex/`). Covers when to delegate, how to write a brief (task, constraints, acceptance criteria), effort and sandbox choice, and a review checklist that includes planting bugs to test the worker's tests.
+- **Usage self-management.** It reads Codex's 5-hour and weekly limits and banked resets (from the Codex app-server), and Claude's own limits. A budget verdict (`OK` / `THROTTLE` / `BLOCKED`) gates every launch.
+- **Budget-aware queue.** `codex-queue.sh drain` runs up to 4 workers in parallel when the budget allows, one at a time when it's tight, and none when blocked.
+- **Live view** (`plugins/codex-workers/`). A Claude Code plugin with an always-on status row (Claude and Codex usage, banked resets, queued tasks), plus a workflow pane of running workers and their current command.
+- **Landing rules.** Work happens in git worktrees. CI runs on Ubuntu and macOS, and installs are atomic, so the live setup never breaks mid-change.
+
+## What's in the repo
 
 | Path | What |
 |---|---|
 | `setup.md` | Full setup notes: roles, usage self-management, sandbox and GUI rules, machine quirks, workflow |
-| `skills/codex/` | Claude Code skill: delegation rules, brief template, review checklist, `codex-run.sh` / `codex-usage.sh` |
+| `skills/codex/` | Claude Code skill: delegation rules, brief template, review checklist, and scripts `codex-run.sh`, `codex-usage.sh`, `codex-queue.sh`, `codex-resets-refresh.sh` |
 | `plugins/codex-workers/` | Claude Code plugin (v0.2): an always-on status row above the prompt with Claude and Codex usage, and a live workflow pane of running Codex workers |
 | `.claude-plugin/marketplace.json` | Makes this repo a plugin marketplace |
 | `install.sh` | One-shot installer for a new machine |

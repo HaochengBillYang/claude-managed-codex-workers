@@ -6,5 +6,6 @@
   "author": {
     "name": "HaochengBillYang"
   },
-  "homepage": "https://github.com/HaochengBillYang/claude-managed-codex-workers"
+  "homepage": "https://github.com/HaochengBillYang/claude-managed-codex-workers",
+  "license": "MIT"
 }
