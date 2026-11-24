@@ -5,6 +5,8 @@ import {
   applyLiveness,
   bandCounts,
   claudeUsageFile,
+  detectDrift,
+  isNewerVersion,
   usageFileState,
   planUsageFileWrite,
   extractClaudeUsage,
@@ -339,6 +341,43 @@ test('the Claude usage file plan needs both windows, skips unchanged values and 
   }))).toEqual({ five_hour_pct: 1, five_hour_resets_at: null, weekly_pct: 2, weekly_resets_at: null })
 })
 
+test('plugin versions compare dotted numeric components', () => {
+  expect(isNewerVersion('0.2.10', '0.2.9')).toBe(true)
+  expect(isNewerVersion('0.2.9', '0.2.10')).toBe(false)
+  expect(isNewerVersion('0.2.5', '0.2.5')).toBe(false)
+  expect(isNewerVersion(undefined, '0.2.5')).toBe(false)
+  expect(isNewerVersion('0.2.5', undefined)).toBe(false)
+  expect(isNewerVersion('garbage', '0.2.5')).toBe(false)
+  expect(isNewerVersion('0.2.5', '0.2.x')).toBe(false)
+})
+
+test('drift reads the installed registry and prefers the user scope', async () => {
+  let registry: string | undefined
+  let pathRead = ''
+  const fs = {
+    async read(path: string) {
+      pathRead = path
+      if (registry === undefined) throw new Error('File missing')
+      return registry
+    },
+  }
+  const check = () => detectDrift(fs.read, '/home/u', '0.2.9')
+  expect(await check()).toBe(null)
+  expect(pathRead).toBe('/home/u/.claude/plugins/installed_plugins.json')
+  registry = '{'
+  expect(await check()).toBe(null)
+  registry = JSON.stringify({ plugins: { 'another-plugin@market': [{ version: '9.0.0' }] } })
+  expect(await check()).toBe(null)
+  const project = { scope: 'project', version: '0.2.11' }
+  const user = { scope: 'user', version: '0.2.10' }
+  registry = JSON.stringify({ plugins: { 'codex-workers@market': [project, user] } })
+  expect(await check()).toEqual({ loaded: '0.2.9', installed: '0.2.10' })
+  registry = JSON.stringify({ plugins: { 'codex-workers@market': [project, { ...user, version: 'bad' }] } })
+  expect(await check()).toBe(null)
+  registry = JSON.stringify({ plugins: { 'codex-workers@market': [project, { scope: 'local', version: '0.2.12' }] } })
+  expect(await check()).toEqual({ loaded: '0.2.9', installed: '0.2.11' })
+})
+
 test('the live poll drives the terminal pane, band, auto-open and command toggle', async ($, on) => {
   const pane = {
     plugin: 'codex-workers',
@@ -368,6 +407,9 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   let measured = 0
   let claudeSnapshot = CLAUDE_USAGE
   let pidChecks = 0
+  let manifestReads = 0
+  let registryReads = 0
+  let installed = '0.2.4'
   const tailReads: { offset?: number; length?: number }[] = []
   const usageFileWrites: { path: string; text: string }[] = []
   const moves: string[][] = []
@@ -403,6 +445,14 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
     return { value: { kind: 'file', size: 70000, mtimeMs: 0, isLink: false } }
   })
   on('fs.read', (_, e) => {
+    if (e.path.endsWith('/.claude-plugin/plugin.json')) {
+      manifestReads += 1
+      return { value: JSON.stringify({ version: '0.2.4' }) }
+    }
+    if (e.path === '/Users/test/.claude/plugins/installed_plugins.json') {
+      registryReads += 1
+      return { value: JSON.stringify({ plugins: { 'codex-workers@market': [{ scope: 'user', version: installed }] } }) }
+    }
     if (e.path === RUN.events) {
       tailReads.push({ offset: e.offset, length: e.length })
       return { value: 'partial\n' + event({ type: 'command_execution', command: '/bin/zsh -lc "ls"' }) + '\n' }
@@ -557,6 +607,7 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   expect(await bandText()).toMatch(/Codex 1 done/)
   expect(claudeUsageCalls).toBe(1)
 
+  installed = '0.2.5'
   now = 5030
   claudeSnapshot = { ...CLAUDE_USAGE, context: { window: 200000, percent: 42 }, rateLimits: [] }
   tick()
@@ -570,6 +621,36 @@ test('the live poll drives the terminal pane, band, auto-open and command toggle
   expect((await paneUi.find({ type: 'Text', text: /^   —$/ }))?.props.dimColor).toBe(true)
   // Only the initial and measured snapshots have both windows.
   expect(usageFileWrites.length).toBe(2)
+
+  expect(manifestReads).toBe(1)
+  expect(registryReads).toBe(1)
+  now = 5060
+  claudeSnapshot = CLAUDE_USAGE
+  tick()
+  const notice = 'codex-workers 0.2.4 loaded, 0.2.5 installed — run /reload-plugins'
+  expect(await waitForRow(/^codex-workers /)).toBe(notice)
+  const [firstLine] = await paneUi.findAll({ type: 'Text' })
+  expect(firstLine?.text).toBe(notice)
+  expect(firstLine?.props.color).toBe('yellow')
+  expect(await waitForRow(/^38%$/)).toBe('38%')
+  expect(registryReads).toBe(2)
+
+  await bandUi.redraw({ ...band.props, bodyColumns: 140 })
+  expect(await bandText()).toBe('Claude 5h 23% · wk 41% · ctx 38% │ Codex 1 done · 5h 9% · wk 16% · ↺1 │ /codex-workers │ update ready: /reload-plugins')
+  expect((await bandUi.find({ type: 'Text', text: /update ready/ }))?.props.color).toBe('yellow')
+  await bandUi.redraw({ ...band.props, bodyColumns: 105 })
+  expect(await bandText()).toBe('Claude 5h 23% · wk 41% · ctx 38% │ Codex 1 done · 5h 9% · wk 16% · ↺1 │ update ready: /reload-plugins')
+  await bandUi.redraw({ ...band.props, bodyColumns: 70 })
+  expect(await bandText()).toBe('C 23%/41% │ X 1 done 9%/16% ↺1 │ ⟳ reload')
+  expect((await bandUi.find({ type: 'Text', text: /⟳ reload/ }))?.props.color).toBe('yellow')
+
+  installed = 'invalid'
+  now = 5120
+  claudeSnapshot = { ...CLAUDE_USAGE, context: { window: 200000, percent: 42 } }
+  tick()
+  expect(await waitForRow(/^42%$/)).toBe('42%')
+  expect(registryReads).toBe(3)
+  expect(await waitForRow(/^codex-workers /)).toBe(notice)
 
   const command = {
     command: 'codex-workers', args: '', origin: { kind: 'composer' },

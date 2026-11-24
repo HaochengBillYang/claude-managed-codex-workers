@@ -8,6 +8,7 @@ import type {
   RunRecord,
   RunStatus,
   UsageWindow,
+  VersionDrift,
   Worker,
 } from '../types'
 
@@ -22,6 +23,7 @@ const PANE_WINDOW = 30 * 60
 const BAND_WINDOW = 60
 const SPINNER = Array.from('⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏')
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const DRIFT_INTERVAL = 60
 const UNKNOWN_USAGE: CodexUsage = {
   fiveHour: null,
   weekly: null,
@@ -40,6 +42,7 @@ const claudeUsage = atom({ plugin: 'codex-workers', key: 'claudeUsage' } as cons
   { fiveHour: null, weekly: null, contextPercent: null, costUsd: null }, { shape: 'claude-usage-1' })
 const seenIds = atom({ plugin: 'codex-workers', key: 'seenIds' } as const,
   [], { shape: 'seen-1' })
+const drift = atom({ plugin: 'codex-workers', key: 'drift' } as const, null)
 const paneOpen = atom({ plugin: 'codex-workers', key: 'paneOpen' } as const, false)
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -54,6 +57,44 @@ function json(text: string): Record<string, unknown> | undefined {
   } catch {
     return undefined
   }
+}
+
+function version(value: unknown): string | undefined {
+  return typeof value === 'string' && /^\d+(?:\.\d+)*$/.test(value) ? value : undefined
+}
+
+export function isNewerVersion(installed: unknown, loaded: unknown): boolean {
+  const newer = version(installed)?.split('.').map(part => BigInt(part))
+  const older = version(loaded)?.split('.').map(part => BigInt(part))
+  if (!newer || !older) return false
+  for (let i = 0; i < Math.max(newer.length, older.length); i += 1) {
+    const a = newer[i] ?? 0n
+    const b = older[i] ?? 0n
+    if (a !== b) return a > b
+  }
+  return false
+}
+
+async function readJson(readFile: (path: string) => Promise<string>, path: string) {
+  try {
+    return json(await readFile(path))
+  } catch {
+    return undefined
+  }
+}
+
+export async function detectDrift(
+  readFile: (path: string) => Promise<string>, home: string, loaded: string | undefined,
+): Promise<VersionDrift | null> {
+  if (!home || !loaded) return null
+  const registry = await readJson(readFile, home + '/.claude/plugins/installed_plugins.json')
+  const plugins = object(registry?.plugins)
+  const key = plugins && Object.keys(plugins).find(name => name.startsWith('codex-workers@'))
+  const entries = key ? plugins?.[key] : undefined
+  if (!Array.isArray(entries)) return null
+  const entry = entries.find(item => object(item)?.scope === 'user') ?? entries[0]
+  const installed = version(object(entry)?.version)
+  return installed && isNewerVersion(installed, loaded) ? { loaded, installed } : null
 }
 
 export function parseRun(text: string, id: string): RunRecord | undefined {
@@ -364,6 +405,7 @@ function clipRow(segments: Segment[], columns: number): Segment[] {
 
 export function layoutBand(
   workers: Worker[], now: number, claude: ClaudeUsage, codex: CodexUsage, columns: number,
+  versionDrift: VersionDrift | null = null,
 ): Segment[] {
   const counts = bandCounts(workers, now)
   const labels = Object.entries(counts).filter(([, count]) => count > 0)
@@ -386,13 +428,18 @@ export function layoutBand(
     ...(resets.length ? [{ text: ' · ' }, ...resets] : []),
   ]
   const hint = { text: ' │ /codex-workers' }
-  const wide = [
-    ...claudeHead, ...(hasClaudeWindows ? [{ text: ' ·' }, ...context] : []), ...codexTail, hint,
-  ]
+  const notice: Segment[] = versionDrift ? [{ text: ' │ update ready: /reload-plugins', color: 'yellow' }] : []
+  const full = [...claudeHead, ...(hasClaudeWindows ? [{ text: ' ·' }, ...context] : []), ...codexTail]
+  const wide = [...full, hint, ...notice]
   if (rowWidth(wide) <= columns) return wide
-  const withoutContext = [...claudeHead, ...codexTail, hint]
-  if (rowWidth(withoutContext) <= columns) return withoutContext
-  const withoutHint = [...claudeHead, ...codexTail]
+  if (versionDrift) {
+    const withContext = [...full, ...notice]
+    if (rowWidth(withContext) <= columns) return withContext
+  } else {
+    const withoutContext = [...claudeHead, ...codexTail, hint]
+    if (rowWidth(withoutContext) <= columns) return withoutContext
+  }
+  const withoutHint = [...claudeHead, ...codexTail, ...notice]
   if (rowWidth(withoutHint) <= columns) return withoutHint
   const compact = [
     ...(hasClaudeWindows ? [
@@ -402,11 +449,12 @@ export function layoutBand(
     { text: ' │ ' }, { text: 'X', color }, { text: ' ' + workerSummary + ' ' },
     codexFiveHour, { text: '/' }, codexWeekly,
   ]
-  if (!resets.length) return clipRow(compact, columns)
-  const compactResets = [{ text: ' ' }, ...resets]
-  const remaining = columns - rowWidth(compactResets)
-  if (remaining > 0) return [...clipRow(compact, remaining), ...compactResets]
-  return clipRow(resets, columns)
+  const compactNotice: Segment[] = versionDrift ? [{ text: ' │ ⟳ reload', color: 'yellow' }] : []
+  const compactResets = resets.length ? [{ text: ' ' }, ...resets] : []
+  const tail = [...compactResets, ...compactNotice]
+  const remaining = columns - rowWidth(tail)
+  if (remaining > 0) return [...clipRow(compact, remaining), ...tail]
+  return clipRow(versionDrift ? compactNotice : resets, columns)
 }
 
 function codexReset(label: string, resets: string): string {
@@ -561,6 +609,10 @@ export const register: Register = on => {
       USAGE_SCRIPT = home + '/.claude/skills/codex/scripts/codex-usage.sh'
       usageFile = usageFileState(home + '/.claude/claude-usage.json')
     }
+    const manifest = await readJson(path => $.fs.read(path), $.plugin.root + '/.claude-plugin/plugin.json')
+    const loaded = version(manifest?.version)
+    await update($, drift, () => null).catch(() => {})
+    let lastDriftCheck = -Infinity
     await $.command.register({ name: 'codex-workers', description: 'Toggle the Codex workers pane' })
     let lastClaudeUsage = (await $.clock.now()) / 1000
     await refreshClaudeUsage($, getMeasurement)
@@ -592,6 +644,12 @@ export const register: Register = on => {
       polling = true
       try {
         const now = (await $.clock.now()) / 1000
+        if (now - lastDriftCheck >= DRIFT_INTERVAL) {
+          lastDriftCheck = now
+          const detected = await detectDrift(path => $.fs.read(path), home, loaded)
+          // Keep a detected update visible until the plugin reloads.
+          if (detected) await update($, drift, () => detected).catch(() => {})
+        }
         if (now - lastClaudeUsage >= 30) {
           lastClaudeUsage = now
           await refreshClaudeUsage($, getMeasurement)
@@ -661,8 +719,8 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const [{ workers, now }, codex, claude, nowMs] = await Promise.all([
-      read($, runs), read($, usage), read($, claudeUsage), $.clock.now(),
+    const [{ workers, now }, codex, claude, nowMs, versionDrift] = await Promise.all([
+      read($, runs), read($, usage), read($, claudeUsage), $.clock.now(), read($, drift),
     ])
     const groups = groupWorkers(workers, now)
     const columns = e.props.bodyColumns
@@ -697,6 +755,11 @@ export const register: Register = on => {
     }
     return (
       <Box flexDirection="column">
+        {versionDrift && (
+          <Text color="yellow" wrap="truncate-end">
+            {`codex-workers ${versionDrift.loaded} loaded, ${versionDrift.installed} installed — run /reload-plugins`}
+          </Text>
+        )}
         {groups.length === 0 && <Text dimColor>No Codex workers yet.</Text>}
         {groups.map(group => {
           const count = group.workers.length
@@ -727,8 +790,10 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Text } = $.ui.resolve(e)
-    const [{ workers, now }, codex, claude] = await Promise.all([read($, runs), read($, usage), read($, claudeUsage)])
-    const row = layoutBand(workers, now, claude, codex, e.props.bodyColumns)
+    const [{ workers, now }, codex, claude, versionDrift] = await Promise.all([
+      read($, runs), read($, usage), read($, claudeUsage), read($, drift),
+    ])
+    const row = layoutBand(workers, now, claude, codex, e.props.bodyColumns, versionDrift)
     return (
       <Box flexDirection="row">
         {row.map(({ text, color, dimColor }) => <Text color={color} dimColor={dimColor} wrap="truncate-end">{text}</Text>)}

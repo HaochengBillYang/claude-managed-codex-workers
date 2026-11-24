@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check shell syntax
+        run: |
+          find . \( -name .git -o -name .claude -o -name .codex-briefs \) -prune -o \
+            -type f -name '*.sh' -exec bash -c '
+              status=0
+              for script do
+                bash -n "$script" || status=1
+              done
+              exit "$status"
+            ' bash {} +
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3.11'
+      - name: Test the rate limiter
+        run: ruby -Ilib -Itest test/test_rate_limiter.rb
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Validate the plugin marketplace
+        run: claude plugin validate .
+      - name: Test the plugin
+        run: claude plugin test plugins/codex-workers

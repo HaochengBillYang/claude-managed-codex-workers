@@ -47,6 +47,8 @@ export type ClaudeUsage = {
   costUsd: number | null
 }
 
+export type VersionDrift = { loaded: string; installed: string }
+
 declare module 'claude-code' {
   interface PluginState {
     'codex-workers': {
@@ -55,6 +57,7 @@ declare module 'claude-code' {
       claudeUsage: Shaped<ClaudeUsage>
       seenIds: Shaped<string[]>
       paneOpen: boolean
+      drift: VersionDrift | null
     }
   }
 }

@@ -130,3 +130,9 @@ advice. Advice highlights the reset indicator in yellow.
 ## v0.2.4 (footer grid)
 
 The pane footer uses fixed columns: an 8-character label, then window cells of fixed width (bar, percent padded to 4, reset text padded to 16). Missing values render as same-width placeholders, so the Claude and Codex rows align. Banked resets always get their own indented line, and on a narrow pane the advice moves to a further line instead of being clipped. Claude has no banked-reset credits: its usage data exposes only window reset times.
+
+## v0.2.5 (drift notice)
+
+The plugin checks the installed version every 60 seconds on its existing poll.
+When a newer version is installed, the band and pane show a yellow reload
+notice that stays visible until `/reload-plugins`.

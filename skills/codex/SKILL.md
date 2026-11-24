@@ -76,6 +76,11 @@ Put it in `<repo>/.codex-briefs/<name>.md` (gitignored; the result, log and even
 List files changed, commands run with results, and anything you could not do or were unsure about.
 ```
 
+Brief rules learned the hard way:
+- **Versions are relative, never absolute.** Write "bump the patch version from the current value in plugin.json", never "set 0.2.1". Other sessions move main, and a hard-coded number can be a silent downgrade that the plugin updater ignores.
+- **UI changes need a render.** For any pane, band or terminal-layout change, require a plain-text render at two widths (e.g. 120 and 60 columns) in the report. Review the render before reloading anything.
+- **API before GUI.** If a CLI, app-server or HTTP API can read it, use that instead of computer use. Example: banked resets come from `codex app-server`, not the Usage page. If GUI is unavoidable, name the exact page, allow navigation only (no clicks on buttons, toggles, upgrade or plan controls), and ask for exact text back.
+
 ## 5. Run
 
 ```
@@ -85,7 +90,27 @@ Always launch with the Bash tool's `run_in_background: true` (one Bash call per 
 
 ## 6. Review (never skip)
 
+- In this repo, run `tests/review.sh` first. It covers syntax, tests, plugin validate and test, installed-vs-repo sync, and version monotonicity. Add `--live` only when a real Codex run is worth its usage.
 - Read `git diff` (or the changed files) yourself; run the acceptance commands yourself — don't trust the report.
+- For worker-written tests that guard real behaviour, plant 3–8 realistic bugs in copies of the code and confirm each one fails a test. Check that each planted bug really is a bug.
 - Check against scope: no unrequested changes, no design drift.
 - Small fixes: do them yourself. Real misses: send a follow-up brief (`codex exec resume --last` is available, but a fresh focused brief is usually better).
 - Tell the user what was delegated, at what effort, and what you changed on review.
+
+## 7. Land without outages
+
+- **Isolate.** Work in a git worktree (EnterWorktree). Never edit the live `~/.claude/skills/codex` or the installed plugin directly.
+- **Hand off to the Git manager** (the "Github Repo Manager" session) with this template:
+  ```
+  Request from the user (via Project Manager): <their words>.
+  Where: <worktree path> (branch <name>, based on <sha>). Uncommitted: <files>.
+  Checks: <review.sh / tests / validate results>.
+  Version: <old> → <new> (bumped from main's current value).
+  Suggested message: "<subject>". Usual trailer. Reply with the SHA.
+  ```
+- **Install only after the push.** Copy skill files with `cp f f.tmp && mv f.tmp f` (atomic; running scripts keep their old inode). For the plugin: `claude plugin marketplace update <marketplace>`, then `claude plugin update codex-workers@<marketplace>`. Open sessions pick it up on `/reload-plugins`, and the band shows "update ready" until then (0.2.5+).
+- **Clean up worktrees.** On 2026-11-24 the owner said "Self iterate", about improving this workflow. Read as: routine cleanup needs no separate OK. Remove a worktree once its branch equals `origin/main` and no process has its working directory inside it (see the worktree-removal-gate memory). Use ExitWorktree with `remove` (and `discard_changes: true` only when the branch's commits are verifiably on origin/main).
+
+## 8. Session hygiene
+
+Long PM sessions are the main Claude cost: about 95% of tokens are cached context re-read on every turn. Prefer one PM session per goal. Before ending one, write a handoff memory (open items, worktrees, running workers, budgets), and start the next session from the project folder.

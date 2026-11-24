@@ -55,7 +55,7 @@ Codex writes rate limits into every session log (`~/.codex/sessions/**/*.jsonl`,
 1. Claude: `codex-usage.sh` → check status.
 2. Claude: write the spec/design (in the repo), then one brief per worker (`.codex-briefs/<name>.md`) using the template in SKILL.md: task, context, constraints (files it may touch, no commits), acceptance criteria, report-back.
 3. Run the workers. Independent workers run in parallel (`codex-run.sh … & codex-run.sh … & wait`).
-4. Claude review: run acceptance commands itself, read the diff, **mutation-test the tests** (plant bugs, confirm tests fail), fix small issues directly, and send real misses back with a new brief.
+4. Claude review: run `tests/review.sh` first, run acceptance commands itself, read the diff, **mutation-test the tests** (plant bugs, confirm tests fail), fix small issues directly, and send real misses back with a new brief.
 5. Claude reports a verdict to the user. Commit or push only when the user asks.
 
 ## Smoke-test record
