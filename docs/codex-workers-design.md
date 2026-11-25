@@ -171,3 +171,9 @@ Directory `$CODEX_QUEUE_DIR`, default `~/.claude/codex-queue/`. One file per tas
 - `codex-queue.sh drain` under SQUEEZE: one worker at a time, only `low` effort entries with `priority < 0` (backlog). New `failed [--json]` (launched entries whose latest run failed, with the failure reason) and `requeue <id>`.
 - `codex-run.sh` records `failure: "rate_limit" | "error"` (or null) in run records.
 - Plugin: SQUEEZE parses and shows in yellow, and BLOCKED→SQUEEZE counts as runnable for the queue notification.
+
+## Run watchdog (2026-11-25)
+
+- `codex-run.sh` stops a worker whose event stream has been silent for `CODEX_IDLE_TIMEOUT` seconds (default 1200) and records `failure: "stalled"`. This happened after the Mac slept mid-run: hung workers held the THROTTLE slot for hours.
+- Limit detection reads only Codex's stderr and its `error`/`turn.failed` events, never item output. A worker reading text that mentions "quota" was mislabelled `rate_limit`.
+- `tests/test_codex_run.sh` covers both with stub binaries.

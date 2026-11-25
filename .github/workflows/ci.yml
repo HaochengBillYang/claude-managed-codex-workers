@@ -35,6 +35,8 @@ jobs:
         run: ruby -Ilib -Itest test/test_rate_limiter.rb
       - name: Test the Codex queue
         run: bash tests/test_codex_queue.sh
+      - name: Test the Codex run wrapper
+        run: bash tests/test_codex_run.sh
       - uses: actions/setup-node@v4
         with:
           node-version: '24'

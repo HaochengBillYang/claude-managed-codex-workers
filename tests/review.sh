@@ -73,6 +73,7 @@ echo "== 1. Repository checks"
 check "shell syntax" shell_syntax
 check "Ruby rate-limiter tests" ruby -Ilib -Itest test/test_rate_limiter.rb
 check "Codex queue tests" bash tests/test_codex_queue.sh
+check "Codex run wrapper tests" bash tests/test_codex_run.sh
 check "claude plugin validate ." claude plugin validate .
 check "claude plugin test plugins/codex-workers" claude plugin test plugins/codex-workers
 

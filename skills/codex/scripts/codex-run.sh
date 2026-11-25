@@ -86,13 +86,38 @@ fi
 write_record running null null
 prune_records
 
+# Watchdog: a worker whose event stream stays silent for CODEX_IDLE_TIMEOUT seconds (default
+# 20 min) is stopped and recorded as `stalled`, e.g. after the Mac slept mid-run. Otherwise
+# a hung worker would hold a THROTTLE/SQUEEZE slot forever.
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+IDLE=${CODEX_IDLE_TIMEOUT:-1200}
+rm -f -- "$BRIEF.stalled"
+(
+  while kill -0 "$child_pid" 2>/dev/null; do
+    sleep "${CODEX_WATCHDOG_INTERVAL:-30}"
+    last=$(mtime "$BRIEF.events.jsonl")
+    if [ $(( $(date +%s) - last )) -gt "$IDLE" ]; then
+      : > "$BRIEF.stalled"; kill -TERM "$child_pid" 2>/dev/null; break
+    fi
+  done
+) &
+watchdog_pid=$!
+
 wait "$child_pid"
 rc=$?
+kill "$watchdog_pid" 2>/dev/null; wait "$watchdog_pid" 2>/dev/null
 status=failed
 FAILURE=
 if (( rc == 0 )); then
   status=done
-elif cat "$BRIEF.log" "$BRIEF.events.jsonl" 2>/dev/null | grep -qiE "usage limit|rate.?limit.?(reached|exceeded)|rate_limit_reached|quota|\b429\b"; then
+elif [ -f "$BRIEF.stalled" ]; then
+  FAILURE=stalled
+  rm -f -- "$BRIEF.stalled"
+# Classify limits only from Codex's own stderr and its error/turn.failed events: never from
+# item output, which may quote any text (a worker reading a file that says "quota" is not a limit).
+elif { cat "$BRIEF.log" 2>/dev/null
+       jq -c 'select(.type == "error" or .type == "turn.failed")' "$BRIEF.events.jsonl" 2>/dev/null
+     } | grep -qiE "usage limit|rate.?limit.?(reached|exceeded)|rate_limit_reached|quota|\b429\b"; then
   FAILURE=rate_limit   # Codex hit its limit mid-run: a candidate for the Claude fallback
 else
   FAILURE=error
