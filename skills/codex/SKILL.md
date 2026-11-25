@@ -31,7 +31,7 @@ OpenAI occasionally grants **banked resets**. On Plus, one redemption restores b
   - `REDEEM_BEFORE_EXPIRY`: resets expire within 3 days and a window is more than 20% used. Remind the user once, so the reset is not wasted.
 - While resets remain, being ahead of the weekly pace does not THROTTLE, because the effective weekly budget is larger.
 - **Never redeem yourself.** It spends a scarce account resource. Only the user redeems.
-- The same app-server also has `account/rateLimitResetCredits/consume`, which REDEEMS a reset. Never call it. Only read methods are allowed.
+- The same app-server also has `account/rateLimitResetCredit/consume` (singular "Credit"; params `creditId`, `idempotencyKey`), which REDEEMS a reset. Never call it on your own. Only when the owner explicitly asks to redeem (done once on 2026-11-25, outcome "reset"), redeem the soonest-expiring credit. Then refresh the usage snapshot with one tiny `codex exec`, because the session-log snapshot stays stale until the next run.
 - After the user redeems, run `scripts/codex-resets-refresh.sh` (or wait 10 min) to update the count. No manual edits are needed.
 
 ### Claude writer budget

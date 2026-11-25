@@ -7,6 +7,7 @@ if [ -n "${CODEX_BIN:-}" ]; then CODEX=$CODEX_BIN
 elif [ -x "$APP_CODEX" ]; then CODEX=$APP_CODEX
 else CODEX=$(command -v codex || echo codex)
 fi
+JQ=$(command -v jq) || JQ=/usr/bin/jq
 RUNS_DIR=${CODEX_RUNS_DIR:-"$HOME/.claude/codex-runs"}
 BATCH=${CODEX_BATCH:-adhoc}
 EFFORT=$1
@@ -30,7 +31,7 @@ started_at=${timestamp##* }
 record=$RUNS_DIR/$id.json
 
 write_record() {
-  /usr/bin/jq -n \
+  "$JQ" -n \
     --arg id "$id" --arg name "$name" --arg batch "$BATCH" \
     --arg brief "$brief_path" --arg workdir "$workdir_path" \
     --arg effort "$EFFORT" --arg model "${CODEX_MODEL:-gpt-6.2-sol}" \
@@ -48,23 +49,50 @@ write_record() {
     }' > "$record.tmp" && mv -f -- "$record.tmp" "$record"
 }
 
+write_final_record() {
+  local ended_at
+  if ! ended_at=$(date +%s) || ! write_record "$1" "$2" "$ended_at"; then
+    printf 'codex-run: failed to write final record %s (status %s)\n' "$record" "$1" >&2
+    exit 1
+  fi
+}
+
 prune_records() (
   LC_ALL=C
   shopt -s nullglob
   # IDs sort by start time, so finalizing a record does not change its rank.
   records=("$RUNS_DIR"/*.json)
   excess=$((${#records[@]} - 50))
-  if (( excess > 0 )); then
-    rm -f -- "${records[@]:0:excess}"
-  fi
+  for ((i=0; i<excess; i++)); do
+    candidate=${records[i]}
+    pid=$("$JQ" -r 'select(.status == "running") | .pid |
+      select(type == "number" and . > 0 and . <= 2147483647 and . == floor)' \
+      "$candidate" 2>/dev/null) || continue
+    if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
+      continue
+    fi
+    rm -f -- "$candidate"
+  done
 )
 
 child_pid=
+watchdog_pid=
 interrupted=
 finish_killed() {
   trap '' INT TERM HUP
+  local deadline=$((SECONDS + 10))
+  if [[ -n $watchdog_pid ]]; then
+    kill "$watchdog_pid" 2>/dev/null
+  fi
   kill -TERM "$child_pid" 2>/dev/null
-  write_record killed 130 "$(date +%s)"
+  while kill -0 "$child_pid" 2>/dev/null && (( SECONDS < deadline )); do
+    sleep 0.1
+  done
+  if kill -0 "$child_pid" 2>/dev/null; then
+    kill -KILL "$child_pid" 2>/dev/null
+  fi
+  wait "$child_pid" 2>/dev/null
+  write_final_record killed 130
   prune_records
   exit 130
 }
@@ -116,13 +144,13 @@ elif [ -f "$BRIEF.stalled" ]; then
 # Classify limits only from Codex's own stderr and its error/turn.failed events: never from
 # item output, which may quote any text (a worker reading a file that says "quota" is not a limit).
 elif { cat "$BRIEF.log" 2>/dev/null
-       jq -c 'select(.type == "error" or .type == "turn.failed")' "$BRIEF.events.jsonl" 2>/dev/null
+       "$JQ" -c 'select(.type == "error" or .type == "turn.failed")' "$BRIEF.events.jsonl" 2>/dev/null
      } | grep -qiE "usage limit|rate.?limit.?(reached|exceeded)|rate_limit_reached|quota|\b429\b"; then
   FAILURE=rate_limit   # Codex hit its limit mid-run: a candidate for the Claude fallback
 else
   FAILURE=error
 fi
-write_record "$status" "$rc" "$(date +%s)"
+write_final_record "$status" "$rc"
 prune_records
 
 echo "codex exit=$rc  result=$BRIEF.result  log=$BRIEF.log"

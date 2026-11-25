@@ -77,6 +77,7 @@ check "Codex run wrapper tests" bash tests/test_codex_run.sh
 check "usage check tests" bash tests/test_codex_usage.sh
 check "banked-resets refresh tests" bash tests/test_resets_refresh.sh
 check "installer tests" bash tests/test_install.sh
+check "Claude budget tests" bash tests/test_claude_budget.sh
 check "claude plugin validate ." claude plugin validate .
 check "claude plugin test plugins/codex-workers" claude plugin test plugins/codex-workers
 

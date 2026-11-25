@@ -43,6 +43,8 @@ jobs:
         run: bash tests/test_resets_refresh.sh
       - name: Test the installer
         run: bash tests/test_install.sh
+      - name: Test the Claude budget
+        run: bash tests/test_claude_budget.sh
       - uses: actions/setup-node@v4
         with:
           node-version: '24'

@@ -12,18 +12,54 @@ elif [ -x "$APP_CODEX" ]; then CODEX=$APP_CODEX
 else CODEX=$(command -v codex || echo codex)
 fi
 
-resp=$({
+mkdir -p "$(dirname "$OUT")" || exit 1
+lock=$OUT.lock
+owner=$lock/$$
+tmp=
+cleanup() {
+  if [ -n "$tmp" ]; then rm -f "$tmp"; fi
+  if rmdir "$owner" 2>/dev/null; then rmdir "$lock" 2>/dev/null || :; fi
+}
+
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+while :; do
+  if mkdir "$lock" 2>/dev/null; then
+    # Another contender may reclaim the directory before we publish our PID.
+    # Query only when our PID is the sole published claim.
+    if mkdir "$owner" 2>/dev/null; then
+      set -- "$lock"/*
+      if [ "$#" -eq 1 ] && [ "$1" = "$owner" ]; then break; fi
+      rmdir "$owner" || exit 1
+    fi
+  elif [ ! -d "$lock" ]; then
+    exit 1
+  fi
+  for entry in "$lock"/*; do
+    [ -e "$entry" ] || continue
+    [ -d "$entry" ] || exit 1
+    pid=${entry##*/}
+    case $pid in ''|0|*[!0-9]*) exit 1 ;; esac
+    if kill -0 "$pid" 2>/dev/null || ps -p "$pid" >/dev/null 2>&1; then exit 0; fi
+    rmdir "$entry" 2>/dev/null || :
+  done
+  # rmdir only succeeds if no owner has published its PID.
+  rmdir "$lock" 2>/dev/null || :
+done
+
+summary=$({
   printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"codex-usage","version":"1"}}}'
   sleep 1
   printf '%s\n' '{"jsonrpc":"2.0","method":"initialized"}'
   printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read"}'
   sleep "${CODEX_RESETS_WAIT:-6}"
-} | "$CODEX" app-server 2>/dev/null | grep -m1 '^{"id":2')
+} | "$CODEX" app-server 2>/dev/null | jq -nRc '
+  first(inputs | fromjson? | objects | select(.id == 2))
+  | .result.rateLimitResetCredits // empty
+' 2>/dev/null)
 
-summary=$(jq -c '.result.rateLimitResetCredits // empty' <<<"$resp" 2>/dev/null)
 [ -z "$summary" ] && exit 1   # no answer (offline, logged out, older Codex): keep the old cache
 
-mkdir -p "$(dirname "$OUT")"
 tmp=$(mktemp "$OUT.XXXXXX") || exit 1
 jq -c --argjson now "$(date +%s)" '
   {available: .availableCount,

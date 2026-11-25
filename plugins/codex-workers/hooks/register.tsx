@@ -50,6 +50,19 @@ const queue = atom({ plugin: 'codex-workers', key: 'queue' } as const,
 const notified = atom({ plugin: 'codex-workers', key: 'notified' } as const,
   { status: 'UNKNOWN', advice: null }, { shape: 'notified-1' })
 
+async function openPane($: EngineInterface) {
+  const opened = await $.ui.open({ id: PANE, title: TITLE })
+  await update($, paneOpen, () => true)
+  return opened
+}
+
+async function readRenderState($: EngineInterface) {
+  const [{ workers, now }, codex, claude, versionDrift, { queued }] = await Promise.all([
+    read($, runs), read($, usage), read($, claudeUsage), read($, drift), read($, queue),
+  ])
+  return { workers, now, codex, claude, versionDrift, queued }
+}
+
 function object(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -204,21 +217,22 @@ function finishedAt(worker: Worker): number | null {
   return worker.record.status === 'running' ? worker.lostAt : worker.record.ended_at
 }
 
-function isCurrent(worker: Worker, now: number, seconds: number): boolean {
+function isCurrent(worker: Worker, finishedRecently: (endedAt: number) => boolean): boolean {
   const endedAt = finishedAt(worker)
-  return workerStatus(worker) === 'running' || (endedAt !== null && endedAt >= now - seconds)
+  return workerStatus(worker) === 'running' || (endedAt !== null && finishedRecently(endedAt))
 }
 
 export function groupWorkers(workers: Worker[], now: number): { batch: string; workers: Worker[] }[] {
   const newest = [...workers].sort((a, b) => b.record.started_at - a.record.started_at
     || b.record.id.localeCompare(a.record.id))
-  const hasCurrent = newest.some(worker => isCurrent(worker, now, PANE_WINDOW))
+  const isCurrentInPane = (worker: Worker) => isCurrent(worker, endedAt => endedAt >= now - PANE_WINDOW)
+  const hasCurrent = newest.some(isCurrentInPane)
   const fallbackBatch = newest[0]?.record.batch
   const groups = new Map<string, Worker[]>()
   for (const worker of newest) {
     const batch = worker.record.batch
     const members = groups.get(batch) ?? []
-    if (hasCurrent ? isCurrent(worker, now, PANE_WINDOW) : batch === fallbackBatch) {
+    if (hasCurrent ? isCurrentInPane(worker) : batch === fallbackBatch) {
       members.push(worker)
     }
     groups.set(batch, members)
@@ -247,10 +261,7 @@ function countStatuses(workers: Worker[]) {
 }
 
 export function bandCounts(workers: Worker[], now: number) {
-  return countStatuses(workers.filter(worker => {
-    const endedAt = finishedAt(worker)
-    return workerStatus(worker) === 'running' || (endedAt !== null && now - endedAt < BAND_WINDOW)
-  }))
+  return countStatuses(workers.filter(worker => isCurrent(worker, endedAt => now - endedAt < BAND_WINDOW)))
 }
 
 function usageWindow(match: RegExpMatchArray | null): UsageWindow | null {
@@ -393,6 +404,12 @@ export function workerRow(worker: Worker, now: number, columns: number, nameWidt
 type UsageColor = 'yellow' | 'red'
 type Segment = { text: string; color?: UsageColor; dimColor?: boolean }
 
+function renderSegments(Text: ReturnType<EngineInterface['ui']['resolve']>['Text'], segments: Segment[]) {
+  return segments.map(({ text, color, dimColor }) => (
+    <Text color={color} dimColor={dimColor} wrap="truncate-end">{text}</Text>
+  ))
+}
+
 export function percentColor(percent: number | null): UsageColor | undefined {
   return percent === null ? undefined : percent >= 90 ? 'red' : percent >= 70 ? 'yellow' : undefined
 }
@@ -441,9 +458,11 @@ export function layoutBand(
   const totals = labels.map(([status, count]) => count + ' ' + status).join(' · ')
   const workerSummary = (counts.running ? glyph('running', now) + ' ' : '') + (totals || 'idle')
   const context = [{ text: ' ctx ' }, percentage(claude.contextPercent)]
+  const claudeFiveHour = percentage(claude.fiveHour?.percent ?? null)
+  const claudeWeekly = percentage(claude.weekly?.percent ?? null)
   const claudeWindows = [
-    { text: ' 5h ' }, percentage(claude.fiveHour?.percent ?? null),
-    { text: ' · wk ' }, percentage(claude.weekly?.percent ?? null),
+    { text: ' 5h ' }, claudeFiveHour,
+    { text: ' · wk ' }, claudeWeekly,
   ]
   const codexFiveHour = percentage(codex.fiveHour?.percent ?? null)
   const codexWeekly = percentage(codex.weekly?.percent ?? null)
@@ -476,8 +495,7 @@ export function layoutBand(
   if (rowWidth(withoutHint) <= columns) return withoutHint
   const compact = [
     ...(hasClaudeWindows ? [
-      { text: 'C ' }, percentage(claude.fiveHour?.percent ?? null), { text: '/' },
-      percentage(claude.weekly?.percent ?? null),
+      { text: 'C ' }, claudeFiveHour, { text: '/' }, claudeWeekly,
     ] : [{ text: 'C' }, ...context]),
     { text: ' │ ' }, { text: 'X', color }, { text: ' ' + workerSummary + ' ' },
     codexFiveHour, { text: '/' }, codexWeekly,
@@ -721,13 +739,12 @@ export const register: Register = on => {
           const prior = byId.get(worker.record.id)
           return (prior?.record.status === 'running' && worker.record.status !== 'running')
             || (prior?.lostAt == null && worker.lostAt !== null)
-            || (!prior && isCurrent(worker, now, BAND_WINDOW) && worker.record.status !== 'running')
+            || (!prior && isCurrent(worker, endedAt => endedAt >= now - BAND_WINDOW) && worker.record.status !== 'running')
         })
         await update($, runs, () => ({ now, workers }))
         void refreshUsage(now)
         if (newRun && (!(await read($, paneOpen)) || !(await $.ui.panes()).some(pane => pane.id === PANE))) {
-          await $.ui.open({ id: PANE, title: TITLE })
-          await update($, paneOpen, () => true)
+          await openPane($)
         }
         const unseen = workers.map(worker => worker.record.id).filter(id => !known.has(id))
         if (unseen.length) await update($, seenIds, ids => [...new Set([...ids, ...unseen])])
@@ -748,8 +765,7 @@ export const register: Register = on => {
       await $.ui.close({ id: PANE })
       return { text: 'Codex workers pane closed.' }
     }
-    const opened = await $.ui.open({ id: PANE, title: TITLE })
-    await update($, paneOpen, () => true)
+    const opened = await openPane($)
     return { text: opened.isPlaced ? 'Codex workers pane opened.' : 'Codex workers pane is waiting for a surface.' }
   })
 
@@ -761,8 +777,8 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const [{ workers, now }, codex, claude, nowMs, versionDrift, { queued }] = await Promise.all([
-      read($, runs), read($, usage), read($, claudeUsage), $.clock.now(), read($, drift), read($, queue),
+    const [{ workers, now, codex, claude, versionDrift, queued }, nowMs] = await Promise.all([
+      readRenderState($), $.clock.now(),
     ])
     const groups = groupWorkers(workers, now)
     const columns = e.props.bodyColumns
@@ -826,7 +842,7 @@ export const register: Register = on => {
         <Text dimColor>{'─'.repeat(columns)}</Text>
         {footer.map(row => (
           <Box flexDirection="row">
-            {row.map(({ text, color, dimColor }) => <Text color={color} dimColor={dimColor} wrap="truncate-end">{text}</Text>)}
+            {renderSegments(Text, row)}
           </Box>
         ))}
       </Box>
@@ -836,13 +852,11 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Text } = $.ui.resolve(e)
-    const [{ workers, now }, codex, claude, versionDrift, { queued }] = await Promise.all([
-      read($, runs), read($, usage), read($, claudeUsage), read($, drift), read($, queue),
-    ])
+    const { workers, now, codex, claude, versionDrift, queued } = await readRenderState($)
     const row = layoutBand(workers, now, claude, codex, e.props.bodyColumns, versionDrift, queued)
     return (
       <Box flexDirection="row">
-        {row.map(({ text, color, dimColor }) => <Text color={color} dimColor={dimColor} wrap="truncate-end">{text}</Text>)}
+        {renderSegments(Text, row)}
       </Box>
     )
   })

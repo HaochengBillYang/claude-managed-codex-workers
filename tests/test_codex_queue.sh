@@ -149,6 +149,7 @@ first=$(enqueue low first) || exit 1
 USAGE_GATE="$WORK/gate" "$QUEUE" drain --max 1 > "$WORK/drain.out" &
 drain_pid=$!
 check 'drain holds the lock while usage is running' wait_for_file "$WORK/gate.ready"
+check 'drain records the lock holder PID' equal "$(cat "$CODEX_QUEUE_DIR/.lock/pid-$drain_pid")" "$drain_pid"
 second=$(enqueue low added-during-drain --priority -1) || exit 1
 check 'a competing drain cannot take the lock' rejects "$QUEUE" drain --max 1
 touch "$WORK/gate.open"
@@ -203,6 +204,88 @@ check 'prune succeeds' "$QUEUE" prune
 check 'prune deletes an entry launched over seven days ago' test ! -e "$CODEX_QUEUE_DIR/$old.json"
 check 'prune retains recent launched entries' test -f "$CODEX_QUEUE_DIR/$recent.json"
 check 'prune retains old queued entries' equal "$("$QUEUE" list --json | jq -r '.[].id')" "$queued"
+
+echo '== Queue hardening'
+fixture lock-recovery
+first=$(enqueue low pending) || exit 1
+mkdir "$CODEX_QUEUE_DIR/.lock" || exit 1
+printf '%s\n' "$dead_pid" > "$CODEX_QUEUE_DIR/.lock/pid-$dead_pid"
+touch "$CODEX_QUEUE_DIR/.lock/entry"
+check 'drain takes over a dead holder with leftover staging data' \
+  equal "$("$QUEUE" drain --max 0)" 'DRAINED=0 QUEUED=1 STATUS=OK'
+check 'recovered lock is released' test ! -e "$CODEX_QUEUE_DIR/.lock"
+
+fixture duplicate
+first=$(enqueue low repeat) || exit 1
+duplicate_rejected() {
+  local output rc=0
+  output=$(enqueue low repeat 2>&1) || rc=$?
+  [[ $rc -eq 1 && $output == *"$1"* && $output == *--force* ]] || {
+    printf 'Unexpected status %s and output: %s\n' "$rc" "$output"
+    return 1
+  }
+}
+check 'add rejects an already queued brief with exit 1 and a message' duplicate_rejected 'queued entry'
+check 'add --force overrides a queued duplicate' enqueue low repeat --force
+second=$("$QUEUE" list --json | jq -r --arg id "$first" '.[] | select(.id != $id) | .id') || exit 1
+"$QUEUE" remove "$second" >/dev/null || exit 1
+"$QUEUE" drain --max 1 >/dev/null || exit 1
+check 'add rejects a live launcher before its run record exists' duplicate_rejected 'running launch'
+rm -f "$CODEX_QUEUE_DIR/.launch-$first"
+jq -n --arg brief "$WORK/repeat.md" --argjson pid "$$" \
+  '{status:"running", $brief, $pid, started_at:(now | floor)}' > "$CODEX_RUNS_DIR/live.json"
+check 'add rejects a launched brief with a live worker PID' duplicate_rejected 'running launch'
+check 'add --force overrides a running duplicate' enqueue low repeat --force
+second=$("$QUEUE" list --json | jq -r '.[0].id') || exit 1
+"$QUEUE" remove "$second" >/dev/null || exit 1
+jq --argjson pid "$dead_pid" '.pid = $pid' "$CODEX_RUNS_DIR/live.json" > "$WORK/run.tmp" &&
+  mv "$WORK/run.tmp" "$CODEX_RUNS_DIR/live.json" || exit 1
+check 'add accepts a launched brief whose worker PID is dead' enqueue low repeat
+
+fixture errors
+first=$(enqueue low pending) || exit 1
+edit_record "$first" '.status = "launched" | .launched_at = 1' || exit 1
+mkdir "$WORK/stubs" || exit 1
+for stub in jq mv; do
+  printf '#!/bin/bash\nexit 42\n' > "$WORK/stubs/$stub"
+  chmod +x "$WORK/stubs/$stub" || exit 1
+  check "requeue fails when $stub fails" rejects env PATH="$WORK/stubs:$PATH" "$QUEUE" requeue "$first"
+  rm -f "$WORK/stubs/$stub"
+  check "requeue leaves no temporary file after $stub fails" \
+    equal "$(find "$CODEX_QUEUE_DIR" -type f)" "$CODEX_QUEUE_DIR/$first.json"
+done
+check 'failed requeue leaves the launched record intact' jq -e \
+  '.status == "launched" and .launched_at == 1' "$CODEX_QUEUE_DIR/$first.json"
+printf 'invalid JSON\n' > "$CODEX_QUEUE_DIR/bad.json"
+printf '{"status":"queued"}\n' > "$CODEX_QUEUE_DIR/z.json"
+check 'failed --json reports a queue record error even before a valid record' rejects "$QUEUE" failed --json
+rm -f "$CODEX_QUEUE_DIR/bad.json"
+printf 'invalid JSON\n' > "$CODEX_RUNS_DIR/bad.json"
+printf '{}\n' > "$CODEX_RUNS_DIR/z.json"
+check 'failed reports a run record error even before a valid record' rejects "$QUEUE" failed
+
+fixture launch-errors
+first=$(enqueue low pending) || exit 1
+queued_after_failure() {
+  jq -e '.status == "queued" and .launched_at == null and .run_log == null' \
+    "$CODEX_QUEUE_DIR/$first.json" >/dev/null &&
+    [[ ! -e $CODEX_QUEUE_DIR/.launch-$first ]]
+}
+mkdir "$WORK/pending.md.queue.out"
+check 'drain fails when it cannot open the log' rejects "$QUEUE" drain
+check 'a log open failure leaves the entry queued and clears the launch marker' queued_after_failure
+rmdir "$WORK/pending.md.queue.out"
+check 'drain fails when the runner is missing' rejects env CODEX_RUN_CMD="$WORK/missing" "$QUEUE" drain
+check 'a missing runner leaves the entry queued and clears the launch marker' queued_after_failure
+mkdir "$WORK/stubs"
+printf '#!/bin/bash\nexit 42\n' > "$WORK/stubs/nohup"
+chmod +x "$WORK/stubs/nohup" || exit 1
+check 'drain propagates an error from nohup' rejects env PATH="$WORK/stubs:$PATH" "$QUEUE" drain
+check 'a nohup error restores the queued entry and clears the launch marker' queued_after_failure
+printf '#!/nonexistent-queue-test-interpreter\n' > "$WORK/broken-runner"
+chmod +x "$WORK/broken-runner" || exit 1
+check 'drain fails when the runner cannot exec' rejects env CODEX_RUN_CMD="$WORK/broken-runner" "$QUEUE" drain
+check 'a runner exec error restores the queued entry and clears the launch marker' queued_after_failure
 
 echo "== $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

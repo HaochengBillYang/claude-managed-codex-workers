@@ -24,27 +24,99 @@ JQ=$(command -v jq || echo /usr/bin/jq)
 NOW=$(date +%s)
 
 die() { printf 'claude-budget: %s\n' "$*" >&2; exit 2; }
-[ -x "$JQ" ] || die "jq not found"
+blocked() {
+  printf 'STATUS=BLOCKED REASON=%s\n' "$*"
+  [ "$cmd" = status ] && exit 0
+  exit 1
+}
 
 cmd=${1:-}; label=${2:-}
 case $cmd in reserve|settle|status) ;; *) die "usage: claude-budget.sh <reserve|settle|status> [label]";; esac
 
+[ -x "$JQ" ] || blocked "jq not found"
+
 # Snapshot -------------------------------------------------------------------
 snapshot=""; snap_age=""
 if [ -f "$USAGE_FILE" ]; then
-  snapshot=$("$JQ" -ce 'select((.five_hour_pct|type)=="number" and (.weekly_pct|type)=="number" and (.updated_at|type)=="number")' "$USAGE_FILE" 2>/dev/null) || snapshot=""
-  [ -n "$snapshot" ] && snap_age=$(( NOW - $("$JQ" -r '.updated_at|floor' <<<"$snapshot") ))
+  snapshot=$("$JQ" -ces '
+    def reset: . == null or type == "number";
+    select(length == 1) | .[0]
+    | select((.five_hour_pct|type)=="number" and (.weekly_pct|type)=="number" and
+             (.updated_at|type)=="number" and (.five_hour_resets_at|reset) and (.weekly_resets_at|reset))
+  ' "$USAGE_FILE" 2>/dev/null) || snapshot=""
+  if [ -n "$snapshot" ]; then
+    updated=$("$JQ" -er '.updated_at | floor' <<<"$snapshot") || blocked "could not calculate snapshot age"
+    [[ $updated =~ ^[0-9]+$ ]] || blocked "invalid snapshot timestamp"
+    snap_age=$(( NOW - updated ))
+  fi
 fi
 
 # Ledger (with a mkdir lock for writers) --------------------------------------
 LOCK="$LEDGER.lock"
+LOCK_PID="$LOCK/pid-$$"
 lock() {
-  local i
-  for i in $(seq 1 50); do mkdir "$LOCK" 2>/dev/null && { trap 'rmdir "$LOCK" 2>/dev/null' EXIT; return 0; }; sleep 0.1; done
-  die "ledger is locked ($LOCK); remove it if no other claude-budget.sh is running"
+  local i marker pid
+  mkdir -p "$(dirname "$LEDGER")" || blocked "could not create ledger directory"
+  for ((i=0; i<50; i++)); do
+    if mkdir "$LOCK" 2>/dev/null; then
+      if ! printf '%s\n' "$$" > "$LOCK_PID"; then
+        rm -f "$LOCK_PID"
+        rmdir "$LOCK"
+        blocked "could not record ledger lock holder"
+      fi
+      trap 'rm -f "$LOCK_PID"; rmdir "$LOCK" 2>/dev/null' EXIT
+      return 0
+    fi
+    for marker in "$LOCK"/pid-*; do
+      [ -f "$marker" ] || continue
+      pid=${marker##*/pid-}
+      [[ $pid =~ ^[1-9][0-9]*$ ]] || continue
+      if ! kill -0 "$pid" 2>/dev/null && ! ps -p "$pid" >/dev/null 2>&1; then
+        # Only the contender that removed this holder's marker may remove the directory.
+        if rm "$marker" 2>/dev/null; then
+          rmdir "$LOCK" 2>/dev/null || :
+        fi
+      fi
+    done
+    sleep 0.1
+  done
+  blocked "ledger is locked ($LOCK)"
 }
-ledger() { if [ -f "$LEDGER" ]; then "$JQ" -c 'if type=="object" and (.entries|type)=="array" then . else {entries:[]} end' "$LEDGER" 2>/dev/null || echo '{"entries":[]}'; else echo '{"entries":[]}'; fi; }
-save() { local tmp="$LEDGER.tmp.$$"; mkdir -p "$(dirname "$LEDGER")" && printf '%s\n' "$1" > "$tmp" && mv -f "$tmp" "$LEDGER"; }
+ledger() {
+  if [ ! -e "$LEDGER" ] && [ ! -L "$LEDGER" ]; then
+    local parent
+    parent=$(dirname "$LEDGER")
+    while [ ! -e "$parent" ] && [ ! -L "$parent" ]; do
+      parent=$(dirname "$parent")
+    done
+    [ -d "$parent" ] && [ -x "$parent" ] || return 1
+    printf '%s\n' '{"entries":[]}'
+    return
+  fi
+  [ -f "$LEDGER" ] && [ -r "$LEDGER" ] || return 1
+  "$JQ" -ces '
+    def number: type == "number";
+    def reset: . == null or number;
+    def resets: (.five_hour_resets_at | reset) and (.weekly_resets_at | reset);
+    def entry:
+      type == "object" and (.label | type == "string") and (.t | number) and
+      (.start_5h | number) and (.start_wk | number) and resets and
+      (.settled | . == null or
+        (type == "object" and (.t | number) and (.d5h | number and . >= 0) and
+         (.dwk | number and . >= 0) and resets));
+    select(length == 1) | .[0]
+    | select(type == "object" and (.entries | type == "array" and all(.[]; entry)))
+  ' "$LEDGER" 2>/dev/null
+}
+save() {
+  local tmp
+  tmp=$(mktemp "$LEDGER.tmp.XXXXXX") || return 1
+  if printf '%s\n' "$1" > "$tmp" && mv -f "$tmp" "$LEDGER"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
 
 # Spend in the current windows: settled deltas whose settle-time reset matches the snapshot's.
 # Without a reset time, fall back to entries settled within the window's length.
@@ -57,59 +129,81 @@ SUMS='
       spent_wk: ([$s[] | select(inwin(.; $snap.weekly_resets_at; 604800; "weekly_resets_at")) | .settled.dwk] | add // 0),
       open: ([.entries[] | select(.settled == null)] | length) }'
 
-verdict() { # $1 ledger json -> prints the STATUS line, returns 1 when BLOCKED
+verdict() { # Prints a verdict. Returns 1 for a budget block or 2 for a calculation error.
   local sums s5 swk open status reason=""
   if [ -z "$snapshot" ]; then
     printf 'STATUS=BLOCKED REASON=no Claude usage snapshot at %s (is the codex-workers plugin installed and enabled?)\n' "$USAGE_FILE"; return 1
   fi
-  sums=$("$JQ" -c --argjson snap "$snapshot" --argjson now "$NOW" --argjson tol "$TOLERANCE" "$SUMS" <<<"$1")
-  s5=$("$JQ" -r '.spent_5h' <<<"$sums"); swk=$("$JQ" -r '.spent_wk' <<<"$sums"); open=$("$JQ" -r '.open' <<<"$sums")
-  status=$("$JQ" -rn --argjson a "$s5" --argjson b "$swk" --argjson cap "$CAP" --argjson thr "$THROTTLE_AT" \
-    'if ($a >= $cap or $b >= $cap) then "BLOCKED" elif ($a >= $thr or $b >= $thr) then "THROTTLE" else "OK" end')
+  sums=$("$JQ" -ce --argjson snap "$snapshot" --argjson now "$NOW" --argjson tol "$TOLERANCE" "$SUMS" <<<"$1") || return 2
+  s5=$("$JQ" -er '.spent_5h' <<<"$sums") || return 2
+  swk=$("$JQ" -er '.spent_wk' <<<"$sums") || return 2
+  open=$("$JQ" -er '.open' <<<"$sums") || return 2
+  status=$("$JQ" -ern --argjson a "$s5" --argjson b "$swk" --argjson cap "$CAP" --argjson thr "$THROTTLE_AT" \
+    'if ($a >= $cap or $b >= $cap) then "BLOCKED" elif ($a >= $thr or $b >= $thr) then "THROTTLE" else "OK" end') || return 2
   if [ "$snap_age" -gt "$STALE_AFTER" ]; then
     status=BLOCKED; reason="REASON=STALE snapshot $(( snap_age / 60 )) min old (open Claude Code with the codex-workers plugin to refresh it)"
   elif [ "$status" = BLOCKED ]; then reason="REASON=writer budget of $CAP points used in the 5h or weekly window"
   elif [ "$status" = THROTTLE ]; then reason="REASON=writer spend at or above $THROTTLE_AT points"
   fi
-  "$JQ" -rn --argjson a "$s5" --argjson b "$swk" --argjson cap "$CAP" --arg st "$status" --arg open "$open" --arg reason "$reason" \
-    '"STATUS=\($st) SPENT_5H=\($a) SPENT_WK=\($b) REMAIN_5H=\([$cap-$a,0]|max) REMAIN_WK=\([$cap-$b,0]|max) OPEN=\($open)" + (if $reason != "" then " " + $reason else "" end)'
+  local line
+  line=$("$JQ" -ern --argjson a "$s5" --argjson b "$swk" --argjson cap "$CAP" --arg st "$status" --arg open "$open" --arg reason "$reason" \
+    '"STATUS=\($st) SPENT_5H=\($a) SPENT_WK=\($b) REMAIN_5H=\([$cap-$a,0]|max) REMAIN_WK=\([$cap-$b,0]|max) OPEN=\($open)" + (if $reason != "" then " " + $reason else "" end)') || return 2
+  printf '%s\n' "$line"
   [ "$status" != BLOCKED ]
 }
 
-case $cmd in
-status)
-  l=$(ledger)
+if [ "$cmd" = settle ]; then
+  [ -n "$label" ] || die "settle needs the label given to reserve"
+  [ -n "$snapshot" ] || blocked "no Claude usage snapshot at $USAGE_FILE"
+fi
+[ "$cmd" = status ] || lock
+l=$(ledger) || blocked "unreadable or malformed ledger at $LEDGER"
+
+# Capture the verdict before printing it or committing any mutation.
+check_verdict() {
+  verdict_rc=0
+  line=$(verdict "$1") || verdict_rc=$?
+  [ "$verdict_rc" -le 1 ] || blocked "could not calculate writer budget"
+}
+
+if [ "$cmd" = status ]; then
+  check_verdict "$l"
   if [ -n "$snapshot" ]; then
-    "$JQ" -r --argjson age "$snap_age" '"Claude usage (snapshot \($age / 60 | floor) min old): 5h \(.five_hour_pct)%, weekly \(.weekly_pct)%"' <<<"$snapshot"
+    "$JQ" -er --argjson age "$snap_age" '"Claude usage (snapshot \($age / 60 | floor) min old): 5h \(.five_hour_pct)%, weekly \(.weekly_pct)%"' <<<"$snapshot" \
+      || blocked "could not display usage snapshot"
   fi
-  "$JQ" -r '.entries[] | select(.settled == null) | "  open reservation: \(.label) (since \(.t | strftime("%Y-%m-%d %H:%M")) UTC)"' <<<"$l"
-  verdict "$l"; exit 0
-  ;;
+  "$JQ" -r '.entries[] | select(.settled == null) | "  open reservation: \(.label) (since \(.t | strftime("%Y-%m-%d %H:%M")) UTC)"' <<<"$l" \
+    || blocked "could not display open reservations"
+  printf '%s\n' "$line"
+  exit 0
+fi
+
+[ -n "$label" ] || label="writer-$NOW"
+open_reservation=$("$JQ" -er --arg label "$label" 'any(.entries[]; .label == $label and .settled == null) | tostring' <<<"$l") \
+  || blocked "could not check open reservations"
+
+case $cmd in
 reserve)
-  [ -n "$label" ] || label="writer-$NOW"
-  lock; l=$(ledger)
-  if "$JQ" -e --arg label "$label" 'any(.entries[]; .label == $label and .settled == null)' <<<"$l" >/dev/null; then
-    die "an open reservation named '$label' exists; settle it first or pick another label"
-  fi
-  line=$(verdict "$l"); ok=$?
-  if [ $ok -eq 0 ]; then
-    l=$("$JQ" -c --arg label "$label" --argjson snap "$snapshot" --argjson now "$NOW" \
+  [ "$open_reservation" != true ] || die "an open reservation named '$label' exists; settle it first or pick another label"
+  check_verdict "$l"
+  if [ "$verdict_rc" -eq 0 ]; then
+    l=$("$JQ" -ce --arg label "$label" --argjson snap "$snapshot" --argjson now "$NOW" \
       '.entries += [{label: $label, start_5h: $snap.five_hour_pct, start_wk: $snap.weekly_pct,
-         five_hour_resets_at: $snap.five_hour_resets_at, weekly_resets_at: $snap.weekly_resets_at, t: $now, settled: null}]' <<<"$l")
-    save "$l" || die "could not write $LEDGER"
-    echo "Reserved '$label' (baseline 5h $("$JQ" -r .five_hour_pct <<<"$snapshot")%, weekly $("$JQ" -r .weekly_pct <<<"$snapshot")%)."
+         five_hour_resets_at: $snap.five_hour_resets_at, weekly_resets_at: $snap.weekly_resets_at, t: $now, settled: null}]' <<<"$l") \
+      || blocked "could not update reservation"
+    message=$("$JQ" -er --arg label "$label" '"Reserved \u0027\($label)\u0027 (baseline 5h \(.five_hour_pct)%, weekly \(.weekly_pct)%)."' <<<"$snapshot") \
+      || blocked "could not display reservation"
+    save "$l" || blocked "could not write $LEDGER"
+    printf '%s\n' "$message"
   fi
-  echo "$line"; exit $(( ok == 0 ? 0 : 1 ))
+  printf '%s\n' "$line"
+  exit "$verdict_rc"
   ;;
 settle)
-  [ -n "$label" ] || die "settle needs the label given to reserve"
-  [ -n "$snapshot" ] || die "no Claude usage snapshot at $USAGE_FILE"
-  lock; l=$(ledger)
-  "$JQ" -e --arg label "$label" 'any(.entries[]; .label == $label and .settled == null)' <<<"$l" >/dev/null \
-    || die "no open reservation named '$label'"
+  [ "$open_reservation" = true ] || die "no open reservation named '$label'"
   [ "$snap_age" -gt "$STALE_AFTER" ] && printf 'claude-budget: warning: snapshot is %s min old; the delta may be too low\n' $(( snap_age / 60 )) >&2
   # delta = now - start, floored at 0; if the window reset in between, the post-reset value.
-  l=$("$JQ" -c --arg label "$label" --argjson snap "$snapshot" --argjson now "$NOW" --argjson tol "$TOLERANCE" '
+  l=$("$JQ" -ce --arg label "$label" --argjson snap "$snapshot" --argjson now "$NOW" --argjson tol "$TOLERANCE" '
     def same($a; $b): ($a != null and $b != null and (($a - $b) | fabs) <= $tol);
     def delta($start; $end; $r0; $r1): if ($r0 != null and $r1 != null and (same($r0; $r1) | not)) then $end else ([$end - $start, 0] | max) end;
     (.entries | map(.label == $label and .settled == null) | rindex(true)) as $i
@@ -117,9 +211,13 @@ settle)
         d5h: delta(.start_5h; $snap.five_hour_pct; .five_hour_resets_at; $snap.five_hour_resets_at),
         dwk: delta(.start_wk; $snap.weekly_pct; .weekly_resets_at; $snap.weekly_resets_at),
         end_5h: $snap.five_hour_pct, end_wk: $snap.weekly_pct,
-        five_hour_resets_at: $snap.five_hour_resets_at, weekly_resets_at: $snap.weekly_resets_at, t: $now}})' <<<"$l")
-  save "$l" || die "could not write $LEDGER"
-  "$JQ" -r --arg label "$label" '[.entries[] | select(.label == $label)] | last | "Settled \(.label): 5h +\(.settled.d5h) points, weekly +\(.settled.dwk) points."' <<<"$l"
-  verdict "$l"; exit 0
+        five_hour_resets_at: $snap.five_hour_resets_at, weekly_resets_at: $snap.weekly_resets_at, t: $now}})' <<<"$l") \
+    || blocked "could not settle reservation"
+  message=$("$JQ" -er --arg label "$label" '[.entries[] | select(.label == $label)] | last | "Settled \(.label): 5h +\(.settled.d5h) points, weekly +\(.settled.dwk) points."' <<<"$l") \
+    || blocked "could not display settlement"
+  check_verdict "$l"
+  save "$l" || blocked "could not write $LEDGER"
+  printf '%s\n' "$message" "$line"
+  exit 0
   ;;
 esac

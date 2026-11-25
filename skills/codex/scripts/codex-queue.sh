@@ -12,7 +12,7 @@ run_cmd=${CODEX_RUN_CMD:-"$script_dir/codex-run.sh"}
 fail() { printf 'codex-queue: %s\n' "$*" >&2; exit 1; }
 usage() {
   cat >&2 <<'EOF'
-Usage: codex-queue.sh add <effort> <sandbox> <workdir> <brief> [--batch NAME] [--priority N] [--model M]
+Usage: codex-queue.sh add <effort> <sandbox> <workdir> <brief> [--batch NAME] [--priority N] [--model M] [--force]
        codex-queue.sh list [--json]
        codex-queue.sh drain [--max N] [--dry-run]
        codex-queue.sh failed [--json]
@@ -24,10 +24,26 @@ EOF
 }
 
 lock_queue() {
+  local owner holder attempts=0
   mkdir -p -- "$queue_dir" || exit 1
-  lock_dir=$queue_dir/.lock
-  mkdir -- "$lock_dir" 2>/dev/null || fail "cannot acquire queue lock: $lock_dir"
-  trap 'rmdir -- "$lock_dir"' EXIT
+  lock_dir=$queue_dir/${1:-.lock}
+  until mkdir -- "$lock_dir" 2>/dev/null; do
+    # Only the process that removes the dead holder's marker can remove the
+    # directory. An empty directory may have a holder about to publish its PID.
+    for owner in "$lock_dir"/pid-*; do
+      holder=${owner##*/pid-}
+      [[ $holder =~ ^[1-9][0-9]*$ ]] && ! pid_alive "$holder" &&
+        rm -- "$owner" 2>/dev/null &&
+        rm -f -- "$lock_dir/entry" && rmdir -- "$lock_dir" 2>/dev/null && continue 2
+      break
+    done
+    [[ ${1:-} == .add-lock && $attempts -lt 100 ]] || fail "cannot acquire queue lock: $lock_dir"
+    attempts=$((attempts + 1))
+    sleep 0.05
+  done
+  lock_owner=$lock_dir/pid-$$
+  trap 'rm -f -- "$lock_owner"; rmdir -- "$lock_dir"' EXIT
+  printf '%s\n' "$$" > "$lock_owner" || exit 1
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
@@ -36,11 +52,12 @@ lock_queue() {
 add_entry() {
   [[ $# -ge 4 ]] || usage
   local effort=$1 sandbox=$2 workdir=$3 brief=$4
-  local batch=adhoc priority=0 model='null' name timestamp created id staging
+  local force=no batch=adhoc priority=0 model='null' name timestamp created id staging
   shift 4
   case $effort in low|medium|high) ;; *) usage ;; esac
   case $sandbox in read-only|workspace-write) ;; *) usage ;; esac
   while [[ $# -gt 0 ]]; do
+    if [[ $1 == --force ]]; then force=yes; shift; continue; fi
     [[ $# -ge 2 ]] || usage
     case $1 in
       --batch) batch=$2 ;;
@@ -59,7 +76,10 @@ add_entry() {
   timestamp=$(date '+%Y%m%d-%H%M%S %s') || exit 1
   created=${timestamp##* }
 
-  mkdir -p -- "$queue_dir" || exit 1
+  # Serialize duplicate checks and publication while allowing adds during
+  # drain's usage check.
+  lock_queue .add-lock
+  if [[ $force == no ]]; then check_duplicate "$brief" || exit 1; fi
   # Hold the ID until its JSON is published, even when adds overlap.
   while :; do
     staging=$(mktemp -d "$queue_dir/.${timestamp% *}-XXXX") || exit 1
@@ -95,6 +115,51 @@ pid_alive() {
   [[ $1 =~ ^[1-9][0-9]*$ ]] && kill -0 "$1" 2>/dev/null
 }
 
+check_duplicate() {
+  local brief=$1 record existing_brief status since marker pid pids
+  for record in "$queue_dir"/*.json; do
+    existing_brief=$(jq -r '.brief' "$record") || {
+      [[ ! -e $record ]] && continue
+      return 1
+    }
+    [[ $brief == "$existing_brief" || $brief -ef "$existing_brief" ]] || continue
+    status=$(jq -r '.status' "$record") || return 1
+    case $status in
+      queued) fail "brief already has a queued entry: $brief (use --force)" ;;
+      launched)
+        marker=$queue_dir/.launch-${record##*/}
+        marker=${marker%.json}
+        if [[ -f $marker ]]; then
+          pid=$(cat -- "$marker" 2>/dev/null) || pid=
+          if pid_alive "$pid"; then
+            fail "brief already has a running launch: $brief (use --force)"
+          fi
+          if [[ -z $pid ]]; then
+            for marker in "$queue_dir"/.lock/pid-*; do
+              if pid_alive "${marker##*/pid-}"; then
+                fail "brief already has a launch starting: $brief (use --force)"
+              fi
+            done
+          fi
+        fi
+        since=$(jq -r '.launched_at // 0' "$record") || return 1
+        for marker in "$runs_dir"/*.json; do
+          pids=$(jq -r --arg brief "$existing_brief" --argjson since "$since" '
+            select(.brief == $brief and .status == "running" and (.started_at // $since) >= $since) | .pid
+          ' "$marker") || {
+            [[ ! -e $marker ]] && continue
+            return 1
+          }
+          if pid_alive "$pids"; then
+            fail "brief already has a running launch: $brief (use --force)"
+          fi
+        done
+        ;;
+    esac
+  done
+  return 0
+}
+
 occupied_slots() {
   local record fields status pid launcher published=' ' count=0
   for record in "$runs_dir"/*.json; do
@@ -123,7 +188,11 @@ occupied_slots() {
 }
 
 launch_entry() {
-  local now pid
+  local now
+  command -v "$run_cmd" >/dev/null || {
+    printf 'codex-queue: runner is unavailable: %s\n' "$run_cmd" >&2
+    return 1
+  }
   now=$(date +%s) || return 1
   jq --argjson now "$now" --arg log "$log" \
     '.status = "launched" | .launched_at = $now | .run_log = $log' <<< "$entry" > "$lock_dir/entry" &&
@@ -131,13 +200,35 @@ launch_entry() {
     rm -f -- "$lock_dir/entry"
     return 1
   }
-  (
+  # Run nohup in the foreground so its own errors reach drain. Its shell
+  # detaches the runner and reports errors during the startup check.
+  if (
     export CODEX_BATCH="$batch"
     if [[ -n $model ]]; then export CODEX_MODEL="$model"; fi
-    exec nohup "$run_cmd" "$effort" "$sandbox" "$workdir" "$brief"
-  ) </dev/null > "$log" 2>&1 3>&- &
-  pid=$!
-  printf '%s\n' "$pid" >&3
+    nohup /bin/bash -c '
+      "$@" 3>&- &
+      pid=$!
+      printf "%s\n" "$pid" >&3 || exit 1
+      sleep 0.1
+      if kill -0 "$pid" 2>/dev/null; then exit 0; fi
+      wait "$pid"
+      rc=$?
+      # A runner that already recorded a run did start successfully.
+      for record in "${CODEX_RUNS_DIR:-"$HOME/.claude/codex-runs"}"/*-"$pid".json; do
+        [[ ! -f $record ]] || exit 0
+      done
+      exit "$rc"
+    ' codex-queue-launch "$run_cmd" "$effort" "$sandbox" "$workdir" "$brief"
+  ) </dev/null > "$log" 2>&1; then
+    return 0
+  fi
+  if ! { printf '%s\n' "$entry" > "$lock_dir/entry" &&
+    mv -f -- "$lock_dir/entry" "$queue_dir/$id.json"; }; then
+    rm -f -- "$lock_dir/entry"
+    fail "could not restore queued entry after launch failure: $id"
+  fi
+  printf 'codex-queue: could not launch %s (log: %s)\n' "$id" "$log" >&2
+  return 1
 }
 
 drain() {
@@ -190,7 +281,10 @@ drain() {
     if [[ $dry_run == yes ]]; then
       printf 'Would launch %s\n' "$id"
     else
-      launch_entry 3> "$queue_dir/.launch-$id" || exit 1
+      if ! launch_entry 3> "$queue_dir/.launch-$id"; then
+        rm -f -- "$queue_dir/.launch-$id"
+        exit 1
+      fi
       printf '%s\n' "$id"
       drained=$((drained + 1))
     fi
@@ -214,17 +308,18 @@ case ${1:-} in
     # Launched entries whose latest run record (same brief, started at or after launch) failed.
     [[ $# -le 2 ]] || usage
     out=$(for entry in "$queue_dir"/*.json; do
-      jq -c 'select(.status == "launched")' "$entry" 2>/dev/null
+      jq -c 'select(.status == "launched")' "$entry" 2>/dev/null || exit 1
     done | while IFS= read -r e; do
-      brief=$(jq -r '.brief' <<< "$e"); since=$(jq -r '(.launched_at // 0) - 5' <<< "$e")
+      brief=$(jq -r '.brief' <<< "$e") || exit 1
+      since=$(jq -r '(.launched_at // 0) - 5' <<< "$e") || exit 1
       run=$(for r in "$runs_dir"/*.json; do
-        jq -c --arg b "$brief" --argjson s "$since" 'select(.brief == $b and .started_at >= $s)' "$r" 2>/dev/null
-      done | jq -sc 'sort_by(.started_at) | last // empty')
+        jq -c --arg b "$brief" --argjson s "$since" 'select(.brief == $b and .started_at >= $s)' "$r" 2>/dev/null || exit 1
+      done | jq -sc 'sort_by(.started_at) | last // empty') || exit 1
       [[ -n $run ]] || continue
       jq -c --argjson run "$run" 'select($run.status == "failed" or $run.status == "killed")
         | {id, name, batch, effort, priority, brief, workdir,
-           failure: ($run.failure // $run.status), exit_code: $run.exit_code, run_id: $run.id}' <<< "$e"
-    done | jq -s '.')
+           failure: ($run.failure // $run.status), exit_code: $run.exit_code, run_id: $run.id}' <<< "$e" || exit 1
+    done | jq -s '.') || fail 'could not read failed runs'
     case ${2:-} in
       --json) printf '%s\n' "$out" ;;
       '') jq -r '.[] | [.id, .failure, .effort, .name, .brief] | @tsv' <<< "$out" ;;
@@ -237,7 +332,11 @@ case ${1:-} in
     file=$queue_dir/$2.json
     [[ -f $file ]] || fail "no such entry: $2"
     tmp=$(mktemp "$file.XXXXXX") || exit 1
-    jq '.status = "queued" | .launched_at = null | .run_log = null' "$file" > "$tmp" && mv -f -- "$tmp" "$file"
+    if ! { jq '.status = "queued" | .launched_at = null | .run_log = null' "$file" > "$tmp" &&
+      mv -f -- "$tmp" "$file"; }; then
+      rm -f -- "$tmp"
+      fail "could not requeue entry: $2"
+    fi
     printf '%s\n' "$2"
     ;;
   remove)
