@@ -37,6 +37,12 @@ jobs:
         run: bash tests/test_codex_queue.sh
       - name: Test the Codex run wrapper
         run: bash tests/test_codex_run.sh
+      - name: Test the usage check
+        run: bash tests/test_codex_usage.sh
+      - name: Test the banked-resets refresh
+        run: bash tests/test_resets_refresh.sh
+      - name: Test the installer
+        run: bash tests/test_install.sh
       - uses: actions/setup-node@v4
         with:
           node-version: '24'

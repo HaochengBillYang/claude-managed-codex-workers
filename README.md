@@ -26,10 +26,10 @@ Codex   5h █░░░░░░░░░    9%  resets 23:10       wk ██░
 ## How it works
 
 - **Delegation skill** (`skills/codex/`). Covers when to delegate, how to write a brief (task, constraints, acceptance criteria), effort and sandbox choice, and a review checklist that includes planting bugs to test the worker's tests.
-- **Usage self-management.** It reads Codex's 5-hour and weekly limits and banked resets (from the Codex app-server), and Claude's own limits. A budget verdict (`OK` / `THROTTLE` / `BLOCKED`) gates every launch.
-- **Budget-aware queue.** `codex-queue.sh drain` runs up to 4 workers in parallel when the budget allows, one at a time when it's tight, and none when blocked.
+- **Usage self-management.** It reads Codex's 5-hour and weekly limits and banked resets (from the Codex app-server), and Claude's own limits. A budget verdict (`OK` / `THROTTLE` / `SQUEEZE` / `BLOCKED` / `UNKNOWN`) gates queue launches.
+- **Budget-aware queue.** `codex-queue.sh drain` runs up to 4 workers in parallel under `OK`. Under `THROTTLE` it runs only low-effort jobs, and under `SQUEEZE` it runs only low-effort jobs with negative priority. Both allow one worker at a time. `BLOCKED` and `UNKNOWN` launch nothing.
 - **Live view** (`plugins/codex-workers/`). A Claude Code plugin with an always-on status row (Claude and Codex usage, banked resets, queued tasks), plus a workflow pane of running workers and their current command.
-- **Landing rules.** Work happens in git worktrees. CI runs on Ubuntu and macOS, and installs are atomic, so the live setup never breaks mid-change.
+- **Landing rules.** Work happens in git worktrees. CI runs on Ubuntu and macOS. The PM installs skill updates atomically. `install.sh` replaces the skill folder.
 
 ## What's in the repo
 
@@ -37,11 +37,13 @@ Codex   5h █░░░░░░░░░    9%  resets 23:10       wk ██░
 |---|---|
 | `setup.md` | Full setup notes: roles, usage self-management, sandbox and GUI rules, machine quirks, workflow |
 | `skills/codex/` | Claude Code skill: delegation rules, brief template, review checklist, and scripts `codex-run.sh`, `codex-usage.sh`, `codex-queue.sh`, `codex-resets-refresh.sh`, `claude-budget.sh`, `claude-fallback-budget.sh` |
-| `plugins/codex-workers/` | Claude Code plugin (v0.2): an always-on status row above the prompt with Claude and Codex usage, and a live workflow pane of running Codex workers |
+| `plugins/codex-workers/` | Claude Code plugin: an always-on status row above the prompt with Claude and Codex usage, and a live workflow pane of running Codex workers |
 | `.claude-plugin/marketplace.json` | Makes this repo a plugin marketplace |
 | `install.sh` | One-shot installer for a new machine |
-| `tests/e2e.sh` | End-to-end check: install, usage budget, a live Codex worker, run records, optional Calculator GUI (`--gui`), plugin tests |
+| `tests/e2e.sh` | End-to-end check: installed setup verification, usage budget, a live Codex worker, run records, optional Calculator GUI (`--gui`), plugin tests |
 | `tests/review.sh`, `.github/workflows/ci.yml` | Local review checklist with optional live checks (`--live`, add `--gui` for Calculator), and CI for shell syntax, Ruby, and plugin checks on Ubuntu and macOS |
+| `tests/test_codex_run.sh`, `tests/test_codex_usage.sh`, `tests/test_resets_refresh.sh`, `tests/test_install.sh` | Tests for the run wrapper, usage checker, reset cache refresh and installer |
+| `docs/troubleshooting.md` | Common setup and runtime problems |
 | `docs/codex-workers-design.md` | Design of the worker visualizer |
 | `DESIGN.md`, `lib/`, `test/` | Smoke-test project (token-bucket rate limiter) built by two Codex workers |
 
@@ -57,7 +59,7 @@ cd claude-managed-codex-workers
 
 `install.sh` does three things:
 - copies the skill to `~/.claude/skills/codex`;
-- adds two permission rules to `~/.claude/settings.json`, after backing it up;
+- adds four permission rules to `~/.claude/settings.json`, after backing it up;
 - installs the `codex-workers` plugin at user scope, so it loads in every session.
 
 It is safe to re-run. The manual steps it prints are covered in [setup.md](setup.md#new-machine).

@@ -74,6 +74,9 @@ check "shell syntax" shell_syntax
 check "Ruby rate-limiter tests" ruby -Ilib -Itest test/test_rate_limiter.rb
 check "Codex queue tests" bash tests/test_codex_queue.sh
 check "Codex run wrapper tests" bash tests/test_codex_run.sh
+check "usage check tests" bash tests/test_codex_usage.sh
+check "banked-resets refresh tests" bash tests/test_resets_refresh.sh
+check "installer tests" bash tests/test_install.sh
 check "claude plugin validate ." claude plugin validate .
 check "claude plugin test plugins/codex-workers" claude plugin test plugins/codex-workers
 
