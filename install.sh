@@ -40,7 +40,7 @@ mkdir -p "$HOME/.claude/codex-runs"
 say "Installed skill to $SKILL_DST"
 
 # 3. Permission rules so Codex runs don't prompt every time -----------------
-RULES='["Bash(~/.claude/skills/codex/scripts/codex-usage.sh)","Bash(~/.claude/skills/codex/scripts/codex-run.sh:*)","Bash(~/.claude/skills/codex/scripts/claude-budget.sh:*)"]'
+RULES='["Bash(~/.claude/skills/codex/scripts/codex-usage.sh)","Bash(~/.claude/skills/codex/scripts/codex-run.sh:*)","Bash(~/.claude/skills/codex/scripts/claude-budget.sh:*)","Bash(~/.claude/skills/codex/scripts/claude-fallback-budget.sh:*)"]'
 [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
 cp "$SETTINGS" "$SETTINGS.bak-$STAMP"
 tmp=$(mktemp)
