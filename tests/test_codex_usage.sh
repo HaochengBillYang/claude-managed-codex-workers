@@ -110,6 +110,30 @@ check 'REDEEM_OPTIONAL below 50% weekly usage in SQUEEZE' \
 check 'REDEEM_BEFORE_EXPIRY when resets expire today and usage exceeds 20%' \
   'STATUS=OK RESETS=2 ADVICE=REDEEM_BEFORE_EXPIRY' 21 20 2 null "$PRIMARY_RESET" "$WEEKLY_RESET" "$EXPIRY"
 
+echo '== Snapshot selection'
+# Codex appends other limit kinds after the main one (seen live 2026-11-25: limit_id "premium",
+# null windows). They must be skipped, not read as 0% or as unreadable.
+fixture 93 40 || exit 1
+printf '{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"premium","primary":null,"secondary":null,"rate_limit_reached_type":null}}}\n' >> "$SESSION"
+output=$("$USAGE" 2>&1)
+if [[ ${output##*$'\n'} == "STATUS=SQUEEZE UNTIL=$PRIMARY_RESET REASON=5h=93%" ]]; then ok 'A trailing premium entry with null windows is skipped'; else bad "A trailing premium entry with null windows is skipped (got: ${output##*$'\n'})"; fi
+fixture 93 40 || exit 1
+printf '{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":5' >> "$SESSION"
+output=$("$USAGE" 2>&1)
+if [[ ${output##*$'\n'} == "STATUS=SQUEEZE UNTIL=$PRIMARY_RESET REASON=5h=93%" ]]; then ok 'A trailing partial line is skipped'; else bad "A trailing partial line is skipped (got: ${output##*$'\n'})"; fi
+printf '{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"premium","primary":null,"secondary":null}}}\n' > "$SESSION"
+output=$("$USAGE" 2>&1)
+if [[ ${output##*$'\n'} == "STATUS=UNKNOWN REASON=unreadable_snapshot" ]]; then ok 'Only null-window entries give UNKNOWN, never OK'; else bad "Only null-window entries give UNKNOWN (got: ${output##*$'\n'})"; fi
+# Seen live: runs refused at the limit write files that hold ONLY a premium/null entry. The newest
+# valid snapshot in an older file must be used, so a blocked account still shows BLOCKED.
+fixture 100 43 || exit 1
+NEWER=$(dirname "$SESSION")/zz-refused-run.jsonl
+printf '{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"premium","primary":null,"secondary":null}}}\n' > "$NEWER"
+touch -t 209901010000 "$NEWER"
+output=$("$USAGE" 2>&1)
+if [[ ${output##*$'\n'} == "STATUS=BLOCKED UNTIL=$PRIMARY_RESET REASON=5h_limit" ]]; then ok 'A newer file with only null windows falls back to the older valid snapshot'; else bad "Fallback to older valid snapshot (got: ${output##*$'\n'})"; fi
+rm -f "$NEWER"
+
 if [[ -e $HOME/codex-called ]]; then
   bad 'The codex stub was invoked'
 fi

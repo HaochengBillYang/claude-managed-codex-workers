@@ -6,13 +6,22 @@
 # A cache older than 10 min is refreshed in the background, so this script never waits on it.
 set -u
 NOW=$(date +%s)
-f=""
+# Newest *valid* snapshot across the newest 40 session files. A line still being written (partial
+# JSON) is skipped. So are other limit kinds: runs refused at the limit log limit_id "premium" with
+# null windows, sometimes as the only entries in their file. Only entries carrying both windows
+# (limit_id "codex" or absent) count, so a blocked account keeps showing its last real numbers.
+valid_rl() {
+  grep '"rate_limits"' "$1" 2>/dev/null | tail -20 | jq -c '.. | objects | select(has("rate_limits")) | .rate_limits
+    | select(type == "object" and .primary != null and .secondary != null and ((.limit_id // "codex") == "codex"))' 2>/dev/null | tail -1
+}
+f=""; rl=""; seen=""
 for c in $(ls -t $(find "$HOME/.codex/sessions" -name '*.jsonl' 2>/dev/null) 2>/dev/null | head -40); do
-  grep -q '"rate_limits"' "$c" && { f=$c; break; }
+  grep -q '"rate_limits"' "$c" || continue
+  seen=$c
+  rl=$(valid_rl "$c"); [ -n "$rl" ] && { f=$c; break; }
 done
-[ -z "$f" ] && { echo "No Codex usage snapshot found (run any codex task first)."; echo "STATUS=UNKNOWN"; exit 0; }
-# Newest readable snapshot: a line still being written (partial JSON) is skipped, not fatal.
-rl=$(grep '"rate_limits"' "$f" | tail -5 | jq -c '.. | objects | select(has("rate_limits")) | .rate_limits' 2>/dev/null | tail -1)
+[ -z "$seen" ] && { echo "No Codex usage snapshot found (run any codex task first)."; echo "STATUS=UNKNOWN"; exit 0; }
+[ -z "$f" ] && f=$seen   # only invalid entries: falls through to the unreadable check below
 snap=$(stat -f %m "$f")
 age=$(( (NOW - snap) / 60 ))
 fmt() { date -r "$1" '+%a %b %d %H:%M'; }
