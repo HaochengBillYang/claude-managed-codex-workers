@@ -11,7 +11,8 @@ for c in $(ls -t $(find "$HOME/.codex/sessions" -name '*.jsonl' 2>/dev/null) 2>/
   grep -q '"rate_limits"' "$c" && { f=$c; break; }
 done
 [ -z "$f" ] && { echo "No Codex usage snapshot found (run any codex task first)."; echo "STATUS=UNKNOWN"; exit 0; }
-rl=$(grep '"rate_limits"' "$f" | tail -1 | jq -c '.. | objects | select(has("rate_limits")) | .rate_limits' | tail -1)
+# Newest readable snapshot: a line still being written (partial JSON) is skipped, not fatal.
+rl=$(grep '"rate_limits"' "$f" | tail -5 | jq -c '.. | objects | select(has("rate_limits")) | .rate_limits' 2>/dev/null | tail -1)
 snap=$(stat -f %m "$f")
 age=$(( (NOW - snap) / 60 ))
 fmt() { date -r "$1" '+%a %b %d %H:%M'; }
@@ -21,8 +22,14 @@ win() { # name json -> sets U (effective used %), R (reset epoch), E (elapsed % 
   U=${u%.*}; R=$r
   E=$(( w>0 ? (100 - (R-NOW)*100/(w*60)) : 0 )); [ $E -lt 0 ] && E=0
 }
+# Fail closed: a partial last line or malformed rate-limit data must give UNKNOWN (no launches),
+# never a status computed from empty numbers.
+isnum() { case ${1:-} in ''|*[!0-9]*) return 1;; esac; }
+unreadable() { echo "Codex usage snapshot unreadable ($f)."; echo "STATUS=UNKNOWN REASON=unreadable_snapshot"; exit 0; }
+jq -e '(.primary.used_percent|type=="number") and (.secondary.used_percent|type=="number")' <<<"${rl:-null}" >/dev/null 2>&1 || unreadable
 win primary;   PU=$U; PR=$R
 win secondary; WU=$U; WR=$R; WE=$E
+for v in "$PU" "$PR" "$WU" "$WR" "$WE"; do isnum "$v" || unreadable; done
 echo "Codex usage (snapshot ${age} min old)"
 echo "  5-hour window: ${PU}% used, resets $(fmt $PR)"
 echo "  Weekly window: ${WU}% used (${WE}% of week elapsed), resets $(fmt $WR)"
